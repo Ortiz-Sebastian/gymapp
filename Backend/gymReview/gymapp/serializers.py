@@ -1,5 +1,22 @@
 from rest_framework import serializers
+from django.contrib.auth import get_user_model
 from .models import Gym, Review, Comment
+
+User = get_user_model()
+
+class UserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'email', 'first_name', 'last_name', 
+                 'bio', 'location', 'date_of_birth', 'is_gym_owner']
+        read_only_fields = ['id']
+        extra_kwargs = {
+            'password': {'write_only': True}
+        }
+
+    def create(self, validated_data):
+        user = User.objects.create_user(**validated_data)
+        return user
 
 class ReviewSerializer(serializers.ModelSerializer):
     user = serializers.ReadOnlyField(source='user.username')
@@ -26,6 +43,7 @@ class CommentSerializer(serializers.ModelSerializer):
 class GymSerializer(serializers.ModelSerializer):
     reviews = ReviewSerializer(many=True, read_only=True)
     comments = CommentSerializer(many=True, read_only=True)
+    owner = serializers.ReadOnlyField(source='owner.username')
     
     # Average ratings for each category
     average_equipment_rating = serializers.SerializerMethodField()
@@ -38,7 +56,7 @@ class GymSerializer(serializers.ModelSerializer):
     class Meta:
         model = Gym
         fields = [
-            'id', 'name', 'address', 'description', 
+            'id', 'owner', 'name', 'address', 'description', 
             'created_at', 'updated_at', 'reviews', 'comments',
             'average_equipment_rating', 'average_cleanliness_rating',
             'average_staff_rating', 'average_value_rating',

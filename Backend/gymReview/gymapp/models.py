@@ -1,7 +1,24 @@
 from django.db import models
-from django.contrib.auth.models import User
+from django.contrib.auth.models import AbstractUser
+from django.utils.translation import gettext_lazy as _
+
+class User(AbstractUser):
+    email = models.EmailField(_('email address'), unique=True)
+    bio = models.TextField(max_length=500, blank=True)
+    location = models.CharField(max_length=100, blank=True)
+    profile_picture = models.ImageField(upload_to='profile_pictures/', blank=True, null=True)
+    date_of_birth = models.DateField(null=True, blank=True)
+    is_gym_owner = models.BooleanField(default=False)
+    
+    # Add any additional fields you want here
+    
+    def __str__(self):
+        return self.username
 
 class Gym(models.Model):
+    RATING_CHOICES = [(i, i) for i in range(1, 6)]
+    
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name='owned_gyms')
     name = models.CharField(max_length=200)
     address = models.CharField(max_length=300)
     description = models.TextField()
