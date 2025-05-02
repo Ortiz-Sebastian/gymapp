@@ -11,10 +11,23 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 """
 
 from pathlib import Path
+import os
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# GDAL configuration
+if os.name == 'nt':  # Windows
+    OSGEO4W = r"C:\OSGeo4W"
+    if 'OSGEO4W_ROOT' not in os.environ:
+        os.environ['OSGEO4W_ROOT'] = OSGEO4W
+        os.environ['GDAL_DATA'] = OSGEO4W + r"\share\gdal"
+        os.environ['PROJ_LIB'] = OSGEO4W + r"\share\proj"
+        os.environ['PATH'] = OSGEO4W + r"\bin;" + os.environ['PATH']
+
+# Direct GDAL library paths
+GDAL_LIBRARY_PATH = r'C:\OSGeo4W\bin\gdal310.dll'
+GEOS_LIBRARY_PATH = r'C:\OSGeo4W\bin\geos_c.dll'
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
@@ -37,6 +50,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django.contrib.gis',  # Add GIS support
     'rest_framework',
     'gymapp',
 ]
@@ -91,8 +105,12 @@ WSGI_APPLICATION = 'gymReview.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.contrib.gis.db.backends.postgis',  # Use PostGIS
+        'NAME': 'gymreview',
+        'USER': 'postgres',
+        'PASSWORD': os.getenv('DATABASE_PASSWORD'),
+        'HOST': 'localhost',
+        'PORT': '5432',
     }
 }
 

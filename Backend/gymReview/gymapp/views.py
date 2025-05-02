@@ -5,6 +5,9 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
+from django.db.models import Q
+from django.contrib.gis.geos import Point
+from django.contrib.gis.measure import D
 from .models import Gym, Review, Comment
 from .serializers import GymSerializer, ReviewSerializer, CommentSerializer, UserSerializer
 
@@ -43,8 +46,65 @@ class GymViewSet(viewsets.ModelViewSet):
     serializer_class = GymSerializer
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
-    def perform_create(self, serializer):
-        serializer.save(owner=self.request.user)
+    @action(detail=False, methods=['get'])
+    def nearby(self, request):
+        """
+        Search for gyms within a certain radius of a location.
+        Required query parameters:
+        - lat: latitude
+        - lng: longitude
+        - radius: radius in miles (default: 10)
+        """
+        try:
+            lat = float(request.query_params.get('lat'))
+            lng = float(request.query_params.get('lng'))
+            radius = float(request.query_params.get('radius', 10))  # Default 10 miles
+        except (TypeError, ValueError):
+            return Response(
+                {'error': 'Invalid latitude, longitude, or radius'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Convert miles to meters (1 mile = 1609.34 meters)
+        radius_meters = radius * 1609.34
+
+        # Create a point from the coordinates
+        point = Point(lng, lat, srid=4326)
+
+        # Query gyms within the radius
+        nearby_gyms = Gym.objects.filter(
+            latitude__isnull=False,
+            longitude__isnull=False
+        ).extra(
+            where=['ST_DistanceSphere(ST_MakePoint(longitude, latitude), ST_MakePoint(%s, %s)) <= %s'],
+            params=[lng, lat, radius_meters]
+        )
+
+        serializer = self.get_serializer(nearby_gyms, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def search(self, request):
+        """
+        Search for gyms by name or address.
+        Required query parameter:
+        - q: search query
+        """
+        query = request.query_params.get('q', '')
+        if not query:
+            return Response(
+                {'error': 'Search query is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Search in both name and address
+        gyms = Gym.objects.filter(
+            Q(name__icontains=query) |
+            Q(address__icontains=query)
+        )
+
+        serializer = self.get_serializer(gyms, many=True)
+        return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
     def add_review(self, request, pk=None):

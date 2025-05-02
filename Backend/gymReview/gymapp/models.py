@@ -8,7 +8,6 @@ class User(AbstractUser):
     location = models.CharField(max_length=100, blank=True)
     profile_picture = models.ImageField(upload_to='profile_pictures/', blank=True, null=True)
     date_of_birth = models.DateField(null=True, blank=True)
-    is_gym_owner = models.BooleanField(default=False)
     
     # Add any additional fields you want here
     
@@ -18,10 +17,20 @@ class User(AbstractUser):
 class Gym(models.Model):
     RATING_CHOICES = [(i, i) for i in range(1, 6)]
     
-    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name='owned_gyms')
+    # Using Google Places ID as primary key
+    place_id = models.CharField(max_length=255, primary_key=True)
     name = models.CharField(max_length=200)
     address = models.CharField(max_length=300)
-    description = models.TextField()
+    description = models.TextField(blank=True)
+    latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    phone_number = models.CharField(max_length=20, blank=True)
+    website = models.URLField(blank=True)
+    google_rating = models.DecimalField(max_digits=2, decimal_places=1, null=True, blank=True)
+    google_user_ratings_total = models.IntegerField(null=True, blank=True)
+    photo_reference = models.CharField(max_length=255, blank=True)
+    types = models.JSONField(default=list, blank=True)  # Store Google Places types
+    opening_hours = models.JSONField(null=True, blank=True)  # Store opening hours
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
