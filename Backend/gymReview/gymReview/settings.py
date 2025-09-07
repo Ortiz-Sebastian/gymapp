@@ -16,7 +16,7 @@ import os
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# GDAL configuration
+# GDAL configuration for macOS
 if os.name == 'nt':  # Windows
     OSGEO4W = r"C:\OSGeo4W"
     if 'OSGEO4W_ROOT' not in os.environ:
@@ -24,10 +24,12 @@ if os.name == 'nt':  # Windows
         os.environ['GDAL_DATA'] = OSGEO4W + r"\share\gdal"
         os.environ['PROJ_LIB'] = OSGEO4W + r"\share\proj"
         os.environ['PATH'] = OSGEO4W + r"\bin;" + os.environ['PATH']
-
-# Direct GDAL library paths
-GDAL_LIBRARY_PATH = r'C:\OSGeo4W\bin\gdal310.dll'
-GEOS_LIBRARY_PATH = r'C:\OSGeo4W\bin\geos_c.dll'
+    GDAL_LIBRARY_PATH = r'C:\OSGeo4W\bin\gdal310.dll'
+    GEOS_LIBRARY_PATH = r'C:\OSGeo4W\bin\geos_c.dll'
+else:  # macOS/Linux
+    # Homebrew GDAL paths
+    GDAL_LIBRARY_PATH = '/opt/homebrew/lib/libgdal.dylib'
+    GEOS_LIBRARY_PATH = '/opt/homebrew/lib/libgeos_c.dylib'
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
