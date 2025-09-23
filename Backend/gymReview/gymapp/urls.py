@@ -7,6 +7,7 @@ router.register(r'users', views.UserViewSet)
 router.register(r'gyms', views.GymViewSet)
 router.register(r'reviews', views.ReviewViewSet)
 router.register(r'comments', views.CommentViewSet)
+router.register(r'photos', views.GymPhotoViewSet)
 
 urlpatterns = [
     path('', include(router.urls)),

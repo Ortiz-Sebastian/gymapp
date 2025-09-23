@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import Gym, Review, Comment
+from .models import Gym, Review, Comment, GymPhoto
 
 User = get_user_model()
 
@@ -37,13 +37,21 @@ class CommentSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Comment
-        fields = ['id', 'user', 'gym', 'title', 'text', 'created_at', 'updated_at']
+        fields = ['id', 'user', 'gym', 'title', 'text', 'file_upload', 'created_at', 'updated_at']
         read_only_fields = ['user', 'created_at', 'updated_at']
+
+class GymPhotoSerializer(serializers.ModelSerializer):
+    uploaded_by = serializers.ReadOnlyField(source='uploaded_by.username')
+    
+    class Meta:
+        model = GymPhoto
+        fields = ['id', 'gym', 'photo', 'uploaded_by', 'is_google_photo', 'uploaded_at']
+        read_only_fields = ['uploaded_by', 'uploaded_at']
 
 class GymSerializer(serializers.ModelSerializer):
     reviews = ReviewSerializer(many=True, read_only=True)
     comments = CommentSerializer(many=True, read_only=True)
-    owner = serializers.ReadOnlyField(source='owner.username')
+    photos = GymPhotoSerializer(many=True, read_only=True)
     
     # Average ratings for each category
     average_equipment_rating = serializers.SerializerMethodField()
@@ -56,38 +64,31 @@ class GymSerializer(serializers.ModelSerializer):
     class Meta:
         model = Gym
         fields = [
-            'id', 'owner', 'name', 'address', 'description', 
-            'created_at', 'updated_at', 'reviews', 'comments',
+            'place_id', 'name', 'address', 'description', 
+            'latitude', 'longitude', 'phone_number', 'website',
+            'google_rating', 'google_user_ratings_total', 'photo_reference',
+            'types', 'opening_hours', 'created_at', 'updated_at',
+            'reviews', 'comments', 'photos',
             'average_equipment_rating', 'average_cleanliness_rating',
             'average_staff_rating', 'average_value_rating',
             'average_atmosphere_rating', 'average_overall_rating'
         ]
         read_only_fields = ['created_at', 'updated_at']
     
-    def get_average_rating(self, obj, field_name):
-        reviews = obj.reviews.all()
-        if reviews:
-            return sum(getattr(review, field_name) for review in reviews) / len(reviews)
-        return 0
-    
     def get_average_equipment_rating(self, obj):
-        return self.get_average_rating(obj, 'equipment_rating')
+        return obj.avg_equipment_rating
     
     def get_average_cleanliness_rating(self, obj):
-        return self.get_average_rating(obj, 'cleanliness_rating')
+        return obj.avg_cleanliness_rating
     
     def get_average_staff_rating(self, obj):
-        return self.get_average_rating(obj, 'staff_rating')
+        return obj.avg_staff_rating
     
     def get_average_value_rating(self, obj):
-        return self.get_average_rating(obj, 'value_rating')
+        return obj.avg_value_rating
     
     def get_average_atmosphere_rating(self, obj):
-        return self.get_average_rating(obj, 'atmosphere_rating')
+        return obj.avg_atmosphere_rating
     
     def get_average_overall_rating(self, obj):
-        reviews = obj.reviews.all()
-        if reviews:
-            total_ratings = sum(review.overall_rating for review in reviews)
-            return total_ratings / len(reviews)
-        return 0 
+        return obj.overall_avg_rating 

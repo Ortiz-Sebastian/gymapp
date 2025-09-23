@@ -8,8 +8,9 @@ from django.contrib.auth import get_user_model
 from django.db.models import Q
 from django.contrib.gis.geos import Point
 from django.contrib.gis.measure import D
-from .models import Gym, Review, Comment
-from .serializers import GymSerializer, ReviewSerializer, CommentSerializer, UserSerializer
+from .models import Gym, Review, Comment, GymPhoto
+from .serializers import GymSerializer, ReviewSerializer, CommentSerializer, UserSerializer, GymPhotoSerializer
+from .services import GooglePlacesService
 
 User = get_user_model()
 
@@ -124,6 +125,92 @@ class GymViewSet(viewsets.ModelViewSet):
             return Response(serializer.data, status=201)
         return Response(serializer.errors, status=400)
 
+    @action(detail=True, methods=['post'])
+    def add_photo(self, request, pk=None):
+        gym = self.get_object()
+        serializer = GymPhotoSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save(gym=gym, uploaded_by=request.user)
+            return Response(serializer.data, status=201)
+        return Response(serializer.errors, status=400)
+
+    @action(detail=False, methods=['post'])
+    def search_google_places(self, request):
+        """
+        Search for gyms using Google Places API and save them to database.
+        Required parameters:
+        - latitude: latitude of search center
+        - longitude: longitude of search center
+        - radius: search radius in miles (default: 5)
+        """
+        try:
+            latitude = float(request.data.get('latitude'))
+            longitude = float(request.data.get('longitude'))
+            radius_miles = float(request.data.get('radius', 5))  # Default 5 miles
+        except (TypeError, ValueError):
+            return Response(
+                {'error': 'Invalid latitude, longitude, or radius'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Convert miles to meters (Google Places API uses meters)
+        radius_meters = int(radius_miles * 1609.34)
+        
+        try:
+            # Initialize Google Places service
+            places_service = GooglePlacesService()
+            
+            # Search for gyms
+            places_data = places_service.search_gyms_nearby(
+                latitude=latitude,
+                longitude=longitude,
+                radius=radius_meters
+            )
+            
+            # Create or update gyms in database (hybrid approach)
+            created_gyms = []
+            new_gyms_count = 0
+            existing_gyms_count = 0
+            
+            for place_data in places_data:
+                place_id = place_data.get('place_id')
+                
+                # Check if gym already exists
+                existing_gym = Gym.objects.filter(place_id=place_id).first()
+                
+                if existing_gym:
+                    # Gym exists, just add to results
+                    created_gyms.append(existing_gym)
+                    existing_gyms_count += 1
+                else:
+                    # Create new gym
+                    try:
+                        gym = places_service.create_or_update_gym(place_data)
+                        created_gyms.append(gym)
+                        new_gyms_count += 1
+                    except Exception as e:
+                        # Log error but continue with other gyms
+                        print(f"Error creating gym {place_id}: {str(e)}")
+                        continue
+            
+            # Serialize and return the gyms
+            serializer = self.get_serializer(created_gyms, many=True)
+            return Response({
+                'message': f'Found {len(created_gyms)} gyms in the area',
+                'summary': {
+                    'total_gyms': len(created_gyms),
+                    'new_gyms_added': new_gyms_count,
+                    'existing_gyms_found': existing_gyms_count
+                },
+                'gyms': serializer.data
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Error searching for gyms: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
 class ReviewViewSet(viewsets.ModelViewSet):
     queryset = Review.objects.all()
     serializer_class = ReviewSerializer
@@ -139,3 +226,18 @@ class CommentViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         return Comment.objects.filter(user=self.request.user)
+
+class GymPhotoViewSet(viewsets.ModelViewSet):
+    queryset = GymPhoto.objects.all()
+    serializer_class = GymPhotoSerializer
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+
+    def get_queryset(self):
+        # Allow filtering by gym
+        gym_id = self.request.query_params.get('gym', None)
+        if gym_id:
+            return GymPhoto.objects.filter(gym_id=gym_id)
+        return GymPhoto.objects.all()
+
+    def perform_create(self, serializer):
+        serializer.save(uploaded_by=self.request.user)
