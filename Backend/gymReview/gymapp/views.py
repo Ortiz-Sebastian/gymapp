@@ -8,9 +8,11 @@ from django.contrib.auth import get_user_model
 from django.db.models import Q
 from django.contrib.gis.geos import Point
 from django.contrib.gis.measure import D
-from .models import Gym, Review, Comment, GymPhoto
-from .serializers import GymSerializer, ReviewSerializer, CommentSerializer, UserSerializer, GymPhotoSerializer
-from .services import GooglePlacesService
+from .models import Gym, Review, GymPhoto, ReviewVote, PhotoLike, UserFavorite, PhotoReport
+from .serializers import (GymSerializer, ReviewSerializer, UserSerializer, 
+                         GymPhotoSerializer, ReviewVoteSerializer, PhotoLikeSerializer, UserFavoriteSerializer,
+                         PhotoReportSerializer, AdminGymPhotoSerializer)
+from .services import GooglePlacesService, GeocodingService, LocationValidationService, ImageModerationService
 
 User = get_user_model()
 
@@ -66,6 +68,13 @@ class GymViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # Validate coordinates
+        if not LocationValidationService.validate_coordinates(lat, lng):
+            return Response(
+                {'error': 'Invalid coordinates. Latitude must be between -90 and 90, longitude between -180 and 180'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         # Convert miles to meters (1 mile = 1609.34 meters)
         radius_meters = radius * 1609.34
 
@@ -81,8 +90,26 @@ class GymViewSet(viewsets.ModelViewSet):
             params=[lng, lat, radius_meters]
         )
 
-        serializer = self.get_serializer(nearby_gyms, many=True)
-        return Response(serializer.data)
+        # Add distance information to each gym
+        gyms_with_distance = []
+        for gym in nearby_gyms:
+            distance = LocationValidationService.calculate_distance(lat, lng, float(gym.latitude), float(gym.longitude))
+            gym_data = self.get_serializer(gym).data
+            gym_data['distance_miles'] = round(distance, 2)
+            gyms_with_distance.append(gym_data)
+
+        # Sort by distance
+        gyms_with_distance.sort(key=lambda x: x['distance_miles'])
+
+        return Response({
+            'gyms': gyms_with_distance,
+            'search_center': {
+                'latitude': lat,
+                'longitude': lng,
+                'radius_miles': radius
+            },
+            'total_found': len(gyms_with_distance)
+        })
 
     @action(detail=False, methods=['get'])
     def search(self, request):
@@ -112,18 +139,12 @@ class GymViewSet(viewsets.ModelViewSet):
         gym = self.get_object()
         serializer = ReviewSerializer(data=request.data)
         if serializer.is_valid():
+            # Require authentication to create reviews
             serializer.save(gym=gym, user=request.user)
             return Response(serializer.data, status=201)
         return Response(serializer.errors, status=400)
 
-    @action(detail=True, methods=['post'])
-    def add_comment(self, request, pk=None):
-        gym = self.get_object()
-        serializer = CommentSerializer(data=request.data)
-        if serializer.is_valid():
-            serializer.save(gym=gym, user=request.user)
-            return Response(serializer.data, status=201)
-        return Response(serializer.errors, status=400)
+    # Comment functionality removed - reviews now include text directly
 
     @action(detail=True, methods=['post'])
     def add_photo(self, request, pk=None):
@@ -214,18 +235,20 @@ class GymViewSet(viewsets.ModelViewSet):
 class ReviewViewSet(viewsets.ModelViewSet):
     queryset = Review.objects.all()
     serializer_class = ReviewSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]  # Require auth to create, allow viewing
 
     def get_queryset(self):
-        return Review.objects.filter(user=self.request.user)
+        # For authenticated users, show their own reviews
+        if self.request.user.is_authenticated:
+            return Review.objects.filter(user=self.request.user)
+        # For anonymous users, return empty queryset (they can only view public reviews)
+        return Review.objects.none()
 
-class CommentViewSet(viewsets.ModelViewSet):
-    queryset = Comment.objects.all()
-    serializer_class = CommentSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    def perform_create(self, serializer):
+        # Require authentication to create reviews
+        serializer.save(user=self.request.user)
 
-    def get_queryset(self):
-        return Comment.objects.filter(user=self.request.user)
+# CommentViewSet removed - reviews now include text directly
 
 class GymPhotoViewSet(viewsets.ModelViewSet):
     queryset = GymPhoto.objects.all()
@@ -233,11 +256,581 @@ class GymPhotoViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
 
     def get_queryset(self):
+        # For regular users, only show approved photos
+        if not self.request.user.is_staff:
+            queryset = GymPhoto.objects.filter(moderation_status='approved')
+        else:
+            # Staff can see all photos
+            queryset = GymPhoto.objects.all()
+        
         # Allow filtering by gym
         gym_id = self.request.query_params.get('gym', None)
         if gym_id:
-            return GymPhoto.objects.filter(gym_id=gym_id)
-        return GymPhoto.objects.all()
+            queryset = queryset.filter(gym_id=gym_id)
+        
+        return queryset
+
+    def get_serializer_class(self):
+        # Use admin serializer for staff users
+        if self.request.user.is_staff:
+            return AdminGymPhotoSerializer
+        return GymPhotoSerializer
 
     def perform_create(self, serializer):
-        serializer.save(uploaded_by=self.request.user)
+        photo = serializer.save(uploaded_by=self.request.user)
+        
+        # Run automatic moderation
+        try:
+            moderation_service = ImageModerationService()
+            moderation_result = moderation_service.moderate_image(photo.photo.path)
+            
+            # Update photo with moderation results
+            photo.auto_moderation_score = moderation_result.get('confidence')
+            photo.auto_moderation_flags = moderation_result.get('flags', [])
+            
+            # Determine moderation action
+            action = moderation_service.determine_moderation_action(moderation_result)
+            photo.moderation_status = action
+            
+            if action == 'rejected':
+                photo.rejection_reason = moderation_service.get_rejection_reason(moderation_result)
+            
+            photo.save()
+            
+        except Exception as e:
+            # If moderation fails, set to pending for manual review
+            photo.moderation_status = 'pending'
+            photo.moderation_notes = f"Auto-moderation failed: {str(e)}"
+            photo.save()
+            logger.error(f"Photo moderation failed for photo {photo.id}: {e}")
+
+    @action(detail=True, methods=['post'])
+    def like(self, request, pk=None):
+        """Like or unlike a photo"""
+        photo = self.get_object()
+        like, created = PhotoLike.objects.get_or_create(
+            photo=photo, 
+            user=request.user
+        )
+        
+        if created:
+            photo.likes_count += 1
+            photo.save()
+            return Response({'message': 'Photo liked'}, status=201)
+        else:
+            like.delete()
+            photo.likes_count = max(0, photo.likes_count - 1)
+            photo.save()
+            return Response({'message': 'Photo unliked'}, status=200)
+
+
+class ReviewVoteViewSet(viewsets.ModelViewSet):
+    queryset = ReviewVote.objects.all()
+    serializer_class = ReviewVoteSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return ReviewVote.objects.filter(user=self.request.user)
+
+    @action(detail=False, methods=['post'])
+    def vote(self, request):
+        """Vote helpful or not helpful on a review"""
+        review_id = request.data.get('review_id')
+        vote_type = request.data.get('vote_type')
+        
+        if not review_id or vote_type not in ['helpful', 'not_helpful']:
+            return Response(
+                {'error': 'review_id and vote_type (helpful/not_helpful) are required'}, 
+                status=400
+            )
+        
+        review = get_object_or_404(Review, id=review_id)
+        
+        # Check if user already voted
+        existing_vote = ReviewVote.objects.filter(
+            review=review, 
+            user=request.user
+        ).first()
+        
+        if existing_vote:
+            if existing_vote.vote_type == vote_type:
+                # Same vote, remove it
+                existing_vote.delete()
+                if vote_type == 'helpful':
+                    review.helpful_votes = max(0, review.helpful_votes - 1)
+                else:
+                    review.not_helpful_votes = max(0, review.not_helpful_votes - 1)
+                review.save()
+                return Response({'message': 'Vote removed'}, status=200)
+            else:
+                # Different vote, update it
+                old_vote_type = existing_vote.vote_type
+                existing_vote.vote_type = vote_type
+                existing_vote.save()
+                
+                # Update counts
+                if old_vote_type == 'helpful':
+                    review.helpful_votes = max(0, review.helpful_votes - 1)
+                else:
+                    review.not_helpful_votes = max(0, review.not_helpful_votes - 1)
+                
+                if vote_type == 'helpful':
+                    review.helpful_votes += 1
+                else:
+                    review.not_helpful_votes += 1
+                
+                review.save()
+                return Response({'message': 'Vote updated'}, status=200)
+        else:
+            # New vote
+            ReviewVote.objects.create(
+                review=review,
+                user=request.user,
+                vote_type=vote_type
+            )
+            
+            if vote_type == 'helpful':
+                review.helpful_votes += 1
+            else:
+                review.not_helpful_votes += 1
+            review.save()
+            
+            return Response({'message': 'Vote recorded'}, status=201)
+
+
+class UserFavoriteViewSet(viewsets.ModelViewSet):
+    queryset = UserFavorite.objects.all()
+    serializer_class = UserFavoriteSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return UserFavorite.objects.filter(user=self.request.user)
+
+    @action(detail=False, methods=['post'])
+    def toggle_favorite(self, request):
+        """Add or remove gym from favorites"""
+        gym_id = request.data.get('gym_id')
+        
+        if not gym_id:
+            return Response({'error': 'gym_id is required'}, status=400)
+        
+        gym = get_object_or_404(Gym, place_id=gym_id)
+        favorite, created = UserFavorite.objects.get_or_create(
+            gym=gym,
+            user=request.user
+        )
+        
+        if created:
+            return Response({'message': 'Gym added to favorites'}, status=201)
+        else:
+            favorite.delete()
+            return Response({'message': 'Gym removed from favorites'}, status=200)
+
+
+class GeocodingView(APIView):
+    """
+    API endpoints for geocoding addresses, ZIP codes, and city/state to coordinates
+    """
+    permission_classes = [permissions.AllowAny]  # Allow anonymous access for location services
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.geocoding_service = GeocodingService()
+        self.location_validator = LocationValidationService()
+    
+    def post(self, request):
+        """
+        Geocode an address, ZIP code, or city/state to coordinates
+        
+        Expected JSON payload:
+        {
+            "type": "address|zip_code|city_state",
+            "address": "123 Main St, Los Angeles, CA 90210",  // for type="address"
+            "zip_code": "90210",                              // for type="zip_code"
+            "city": "Los Angeles",                            // for type="city_state"
+            "state": "CA"                                     // for type="city_state"
+        }
+        """
+        try:
+            geocode_type = request.data.get('type')
+            
+            if geocode_type == 'address':
+                address = request.data.get('address')
+                if not address:
+                    return Response(
+                        {'error': 'Address is required for type="address"'}, 
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                result = self.geocoding_service.geocode_address(address)
+                
+            elif geocode_type == 'zip_code':
+                zip_code = request.data.get('zip_code')
+                if not zip_code:
+                    return Response(
+                        {'error': 'ZIP code is required for type="zip_code"'}, 
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                result = self.geocoding_service.geocode_zip_code(zip_code)
+                
+            elif geocode_type == 'city_state':
+                city = request.data.get('city')
+                state = request.data.get('state')
+                if not city or not state:
+                    return Response(
+                        {'error': 'Both city and state are required for type="city_state"'}, 
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                result = self.geocoding_service.geocode_city_state(city, state)
+                
+            else:
+                return Response(
+                    {'error': 'Invalid type. Must be "address", "zip_code", or "city_state"'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            return Response({
+                'success': True,
+                'location': {
+                    'latitude': result['latitude'],
+                    'longitude': result['longitude'],
+                    'formatted_address': result['formatted_address'],
+                    'confidence': result['confidence'],
+                    'provider': result['provider']
+                }
+            }, status=status.HTTP_200_OK)
+            
+        except ValueError as e:
+            return Response(
+                {'error': str(e)}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Geocoding failed: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+    
+    def get(self, request):
+        """
+        Reverse geocode coordinates to address
+        
+        Query parameters:
+        - lat: latitude
+        - lng: longitude
+        """
+        try:
+            lat = float(request.query_params.get('lat'))
+            lng = float(request.query_params.get('lng'))
+        except (TypeError, ValueError):
+            return Response(
+                {'error': 'Valid latitude and longitude parameters are required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate coordinates
+        if not self.location_validator.validate_coordinates(lat, lng):
+            return Response(
+                {'error': 'Invalid coordinates. Latitude must be between -90 and 90, longitude between -180 and 180'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            result = self.geocoding_service.reverse_geocode(lat, lng)
+            
+            return Response({
+                'success': True,
+                'address': {
+                    'formatted_address': result['formatted_address'],
+                    'address_components': result['address_components'],
+                    'provider': result['provider']
+                }
+            }, status=status.HTTP_200_OK)
+            
+        except ValueError as e:
+            return Response(
+                {'error': str(e)}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Reverse geocoding failed: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class LocationValidationView(APIView):
+    """
+    API endpoints for location validation and distance calculations
+    """
+    permission_classes = [permissions.AllowAny]
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.location_validator = LocationValidationService()
+    
+    def post(self, request):
+        """
+        Validate coordinates and calculate distances
+        
+        Expected JSON payload:
+        {
+            "action": "validate|distance|within_radius",
+            "lat1": 34.0522,     // for distance/within_radius
+            "lng1": -118.2437,   // for distance/within_radius
+            "lat2": 34.0522,     // for distance/within_radius
+            "lng2": -118.2437,   // for distance/within_radius
+            "radius_miles": 10   // for within_radius
+        }
+        """
+        try:
+            action = request.data.get('action')
+            
+            if action == 'validate':
+                lat = request.data.get('lat')
+                lng = request.data.get('lng')
+                
+                if lat is None or lng is None:
+                    return Response(
+                        {'error': 'lat and lng are required for validation'}, 
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                is_valid = self.location_validator.validate_coordinates(lat, lng)
+                
+                return Response({
+                    'success': True,
+                    'is_valid': is_valid,
+                    'coordinates': {'latitude': lat, 'longitude': lng}
+                }, status=status.HTTP_200_OK)
+            
+            elif action == 'distance':
+                lat1 = request.data.get('lat1')
+                lng1 = request.data.get('lng1')
+                lat2 = request.data.get('lat2')
+                lng2 = request.data.get('lng2')
+                
+                if any(coord is None for coord in [lat1, lng1, lat2, lng2]):
+                    return Response(
+                        {'error': 'lat1, lng1, lat2, lng2 are required for distance calculation'}, 
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                # Validate all coordinates
+                if not all([
+                    self.location_validator.validate_coordinates(lat1, lng1),
+                    self.location_validator.validate_coordinates(lat2, lng2)
+                ]):
+                    return Response(
+                        {'error': 'Invalid coordinates provided'}, 
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                distance = self.location_validator.calculate_distance(lat1, lng1, lat2, lng2)
+                
+                return Response({
+                    'success': True,
+                    'distance_miles': round(distance, 2),
+                    'coordinates': {
+                        'point1': {'latitude': lat1, 'longitude': lng1},
+                        'point2': {'latitude': lat2, 'longitude': lng2}
+                    }
+                }, status=status.HTTP_200_OK)
+            
+            elif action == 'within_radius':
+                lat1 = request.data.get('lat1')
+                lng1 = request.data.get('lng1')
+                lat2 = request.data.get('lat2')
+                lng2 = request.data.get('lng2')
+                radius_miles = request.data.get('radius_miles')
+                
+                if any(coord is None for coord in [lat1, lng1, lat2, lng2]) or radius_miles is None:
+                    return Response(
+                        {'error': 'lat1, lng1, lat2, lng2, and radius_miles are required'}, 
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                # Validate all coordinates
+                if not all([
+                    self.location_validator.validate_coordinates(lat1, lng1),
+                    self.location_validator.validate_coordinates(lat2, lng2)
+                ]):
+                    return Response(
+                        {'error': 'Invalid coordinates provided'}, 
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                is_within = self.location_validator.is_within_radius(lat1, lng1, lat2, lng2, radius_miles)
+                distance = self.location_validator.calculate_distance(lat1, lng1, lat2, lng2)
+                
+                return Response({
+                    'success': True,
+                    'is_within_radius': is_within,
+                    'distance_miles': round(distance, 2),
+                    'radius_miles': radius_miles,
+                    'coordinates': {
+                        'point1': {'latitude': lat1, 'longitude': lng1},
+                        'point2': {'latitude': lat2, 'longitude': lng2}
+                    }
+                }, status=status.HTTP_200_OK)
+            
+            else:
+                return Response(
+                    {'error': 'Invalid action. Must be "validate", "distance", or "within_radius"'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+                
+        except Exception as e:
+            return Response(
+                {'error': f'Location validation failed: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+class PhotoReportViewSet(viewsets.ModelViewSet):
+    """
+    API for users to report inappropriate photos
+    """
+    queryset = PhotoReport.objects.all()
+    serializer_class = PhotoReportSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        # Users can only see their own reports
+        if not self.request.user.is_staff:
+            return PhotoReport.objects.filter(reporter=self.request.user)
+        return PhotoReport.objects.all()
+
+    def perform_create(self, serializer):
+        serializer.save(reporter=self.request.user)
+
+    @action(detail=False, methods=['post'])
+    def report_photo(self, request):
+        """Report an inappropriate photo"""
+        photo_id = request.data.get('photo_id')
+        reason = request.data.get('reason')
+        description = request.data.get('description', '')
+        
+        if not photo_id or not reason:
+            return Response(
+                {'error': 'photo_id and reason are required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            photo = GymPhoto.objects.get(id=photo_id)
+        except GymPhoto.DoesNotExist:
+            return Response(
+                {'error': 'Photo not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Check if user already reported this photo
+        existing_report = PhotoReport.objects.filter(
+            photo=photo, 
+            reporter=request.user
+        ).first()
+        
+        if existing_report:
+            return Response(
+                {'error': 'You have already reported this photo'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Create the report
+        report = PhotoReport.objects.create(
+            photo=photo,
+            reporter=request.user,
+            reason=reason,
+            description=description
+        )
+        
+        # If multiple reports, flag photo for review
+        report_count = PhotoReport.objects.filter(photo=photo, status='pending').count()
+        if report_count >= 3:  # Threshold for auto-flagging
+            photo.moderation_status = 'flagged'
+            photo.save()
+        
+        serializer = self.get_serializer(report)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class PhotoModerationViewSet(viewsets.ModelViewSet):
+    """
+    API for staff to moderate photos
+    """
+    queryset = GymPhoto.objects.all()
+    serializer_class = AdminGymPhotoSerializer
+    permission_classes = [permissions.IsAdminUser]  # Only staff can moderate
+
+    def get_queryset(self):
+        # Filter by moderation status
+        status = self.request.query_params.get('status', None)
+        if status:
+            return GymPhoto.objects.filter(moderation_status=status)
+        return GymPhoto.objects.exclude(moderation_status='approved')
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        """Approve a photo"""
+        photo = self.get_object()
+        
+        photo.moderation_status = 'approved'
+        photo.moderated_by = request.user
+        photo.moderated_at = timezone.now()
+        photo.moderation_notes = request.data.get('notes', '')
+        photo.save()
+        
+        return Response({'message': 'Photo approved'}, status=200)
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        """Reject a photo"""
+        photo = self.get_object()
+        
+        photo.moderation_status = 'rejected'
+        photo.rejection_reason = request.data.get('reason', 'inappropriate_content')
+        photo.moderated_by = request.user
+        photo.moderated_at = timezone.now()
+        photo.moderation_notes = request.data.get('notes', '')
+        photo.save()
+        
+        return Response({'message': 'Photo rejected'}, status=200)
+
+    @action(detail=True, methods=['post'])
+    def flag(self, request, pk=None):
+        """Flag a photo for manual review"""
+        photo = self.get_object()
+        
+        photo.moderation_status = 'flagged'
+        photo.moderated_by = request.user
+        photo.moderated_at = timezone.now()
+        photo.moderation_notes = request.data.get('notes', '')
+        photo.save()
+        
+        return Response({'message': 'Photo flagged for review'}, status=200)
+
+    @action(detail=False, methods=['get'])
+    def pending_review(self, request):
+        """Get photos pending review"""
+        pending_photos = GymPhoto.objects.filter(
+            moderation_status__in=['pending', 'flagged']
+        ).order_by('uploaded_at')
+        
+        serializer = self.get_serializer(pending_photos, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def moderation_stats(self, request):
+        """Get moderation statistics"""
+        stats = {
+            'pending': GymPhoto.objects.filter(moderation_status='pending').count(),
+            'approved': GymPhoto.objects.filter(moderation_status='approved').count(),
+            'rejected': GymPhoto.objects.filter(moderation_status='rejected').count(),
+            'flagged': GymPhoto.objects.filter(moderation_status='flagged').count(),
+            'total_reports': PhotoReport.objects.filter(status='pending').count(),
+        }
+        
+        return Response(stats)
