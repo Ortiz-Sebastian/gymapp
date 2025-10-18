@@ -8,10 +8,16 @@ from django.contrib.auth import get_user_model
 from django.db.models import Q
 from django.contrib.gis.geos import Point
 from django.contrib.gis.measure import D
-from .models import Gym, Review, GymPhoto, ReviewVote, PhotoLike, UserFavorite, PhotoReport
+from django.utils import timezone
+from .models import (Gym, Review, GymPhoto, ReviewVote, PhotoLike, UserFavorite, PhotoReport,
+                     AmenityCategory, Amenity, GymAmenity, AmenityReport, GymClaim, AmenityVote,
+                     GymAmenityAssertion)
 from .serializers import (GymSerializer, ReviewSerializer, UserSerializer, 
                          GymPhotoSerializer, ReviewVoteSerializer, PhotoLikeSerializer, UserFavoriteSerializer,
-                         PhotoReportSerializer, AdminGymPhotoSerializer)
+                         PhotoReportSerializer, AdminGymPhotoSerializer,
+                         AmenityCategorySerializer, AmenitySerializer, GymAmenitySerializer,
+                         AmenityReportSerializer, GymClaimSerializer, AmenityVoteSerializer,
+                         GymAmenityAssertionSerializer)
 from .services import GooglePlacesService, GeocodingService, LocationValidationService, ImageModerationService
 
 User = get_user_model()
@@ -834,3 +840,215 @@ class PhotoModerationViewSet(viewsets.ModelViewSet):
         }
         
         return Response(stats)
+
+
+# Amenity Management Views
+class AmenityCategoryViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet for amenity categories (read-only for users)"""
+    queryset = AmenityCategory.objects.all()
+    serializer_class = AmenityCategorySerializer
+    permission_classes = [permissions.AllowAny]
+
+
+class AmenityViewSet(viewsets.ModelViewSet):
+    """ViewSet for amenities - users can suggest new amenities"""
+    queryset = Amenity.objects.filter(is_active=True, status='approved')
+    serializer_class = AmenitySerializer
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        category = self.request.query_params.get('category', None)
+        if category:
+            queryset = queryset.filter(category_id=category)
+        return queryset
+    
+    def perform_create(self, serializer):
+        # Users can suggest new amenities
+        serializer.save(
+            suggested_by=self.request.user,
+            is_community_suggested=True,
+            status='pending'
+        )
+
+
+class GymAmenityViewSet(viewsets.ModelViewSet):
+    """ViewSet for gym amenities - users can add amenities to gyms"""
+    queryset = GymAmenity.objects.filter(status='approved')
+    serializer_class = GymAmenitySerializer
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        gym_id = self.request.query_params.get('gym', None)
+        if gym_id:
+            queryset = queryset.filter(gym_id=gym_id)
+        return queryset
+    
+    def perform_create(self, serializer):
+        # Check if amenity already exists for this gym
+        gym = serializer.validated_data['gym']
+        amenity = serializer.validated_data['amenity']
+        
+        if GymAmenity.objects.filter(gym=gym, amenity=amenity).exists():
+            raise serializers.ValidationError("This amenity is already listed for this gym.")
+        
+        # Auto-approve if user has high reputation or amenity is verified
+        if self.request.user.is_staff or amenity.is_verified:
+            status = 'approved'
+        else:
+            status = 'pending'
+        
+        serializer.save(added_by=self.request.user, status=status)
+    
+    @action(detail=True, methods=['post'])
+    def assert_amenity(self, request, pk=None):
+        """User asserts whether gym has this amenity (the new crowd data system)"""
+        gym_amenity = self.get_object()
+        has_amenity = request.data.get('has_amenity')
+        notes = request.data.get('notes', '')
+        
+        if has_amenity is None:
+            return Response({'error': 'has_amenity field is required'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Update user reputation and account age first
+        request.user.update_reputation()
+        request.user.update_account_age()
+        
+        # Get or create assertion
+        assertion, created = GymAmenityAssertion.objects.get_or_create(
+            gym=gym_amenity.gym,
+            amenity=gym_amenity.amenity,
+            user=request.user,
+            defaults={
+                'has_amenity': has_amenity,
+                'notes': notes
+            }
+        )
+        
+        if not created:
+            # Update existing assertion
+            assertion.has_amenity = has_amenity
+            assertion.notes = notes
+            assertion.save()
+        
+        # Update confidence score based on all assertions
+        confidence_data = gym_amenity.update_confidence_score()
+        
+        # Auto-approve if confidence is very high and we have enough data
+        if (gym_amenity.confidence_score > 0.9 and 
+            confidence_data['distinct_users'] >= 3 and
+            gym_amenity.status == 'pending'):
+            gym_amenity.status = 'approved'
+            gym_amenity.save()
+        
+        serializer = self.get_serializer(gym_amenity)
+        response_data = serializer.data
+        response_data['assertion_created'] = created
+        response_data['confidence_data'] = confidence_data
+        
+        return Response(response_data)
+    
+    @action(detail=True, methods=['post'])
+    def flag(self, request, pk=None):
+        """Flag an amenity for community review"""
+        gym_amenity = self.get_object()
+        reason = request.data.get('reason', '')
+        
+        gym_amenity.status = 'flagged'
+        gym_amenity.save()
+        
+        # Create a report for community review
+        AmenityReport.objects.create(
+            gym_amenity=gym_amenity,
+            reporter=request.user,
+            report_type='other',
+            description=f"Flagged for review: {reason}"
+        )
+        
+        serializer = self.get_serializer(gym_amenity)
+        return Response(serializer.data)
+
+
+class AmenityReportViewSet(viewsets.ModelViewSet):
+    """ViewSet for amenity reports"""
+    queryset = AmenityReport.objects.all()
+    serializer_class = AmenityReportSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        if self.request.user.is_staff:
+            return super().get_queryset()
+        return super().get_queryset().filter(reporter=self.request.user)
+    
+    def perform_create(self, serializer):
+        serializer.save(reporter=self.request.user)
+    
+    @action(detail=True, methods=['post'])
+    def review(self, request, pk=None):
+        """Review a report (community-driven)"""
+        report = self.get_object()
+        new_status = request.data.get('status', 'reviewed')
+        review_notes = request.data.get('review_notes', '')
+        
+        # Only allow the reporter or high-reputation users to review
+        if (report.reporter != request.user and 
+            request.user.reputation_score < 50 and 
+            not request.user.is_staff):
+            return Response({'error': 'Insufficient reputation to review'}, status=status.HTTP_403_FORBIDDEN)
+        
+        report.status = new_status
+        report.reviewed_by = request.user
+        report.reviewed_at = timezone.now()
+        report.review_notes = review_notes
+        report.save()
+        
+        serializer = self.get_serializer(report)
+        return Response(serializer.data)
+
+
+class GymClaimViewSet(viewsets.ModelViewSet):
+    """ViewSet for gym ownership claims"""
+    queryset = GymClaim.objects.all()
+    serializer_class = GymClaimSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        if self.request.user.is_staff:
+            return super().get_queryset()
+        return super().get_queryset().filter(claimant=self.request.user)
+    
+    def perform_create(self, serializer):
+        serializer.save(claimant=self.request.user)
+    
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        """Approve a gym claim (staff only)"""
+        if not request.user.is_staff:
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        claim = self.get_object()
+        claim.status = 'approved'
+        claim.reviewed_by = request.user
+        claim.reviewed_at = timezone.now()
+        claim.review_notes = request.data.get('review_notes', '')
+        claim.save()
+        
+        serializer = self.get_serializer(claim)
+        return Response(serializer.data)
+    
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        """Reject a gym claim (staff only)"""
+        if not request.user.is_staff:
+            return Response({'error': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+        
+        claim = self.get_object()
+        claim.status = 'rejected'
+        claim.reviewed_by = request.user
+        claim.reviewed_at = timezone.now()
+        claim.review_notes = request.data.get('review_notes', '')
+        claim.save()
+        
+        serializer = self.get_serializer(claim)
+        return Response(serializer.data)

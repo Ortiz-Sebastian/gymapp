@@ -16,7 +16,9 @@ class User(AbstractUser):
     display_name = models.CharField(max_length=50, blank=True,
                                   help_text="Display name for reviews (if not anonymous)")
     
-    # Add any additional fields you want here
+    # Reputation system
+    reputation_score = models.IntegerField(default=0, help_text="User reputation score")
+    account_age_days = models.IntegerField(default=0, help_text="Account age in days")
     
     def __str__(self):
         return self.username
@@ -27,6 +29,30 @@ class User(AbstractUser):
         if self.is_anonymous_account:
             return self.display_name or "Anon"
         return self.display_name or self.username
+    
+    def update_reputation(self):
+        """Update user reputation based on various factors"""
+        # Base reputation from reviews
+        review_reputation = self.reviews.count() * 10
+        
+        # Bonus for helpful reviews
+        helpful_bonus = sum(review.helpful_votes for review in self.reviews.all()) * 2
+        
+        # Bonus for verified amenities
+        amenity_bonus = self.added_amenities.filter(is_verified=True).count() * 5
+        
+        # Penalty for reported content
+        reported_penalty = PhotoReport.objects.filter(photo__uploaded_by=self).count() * -10
+        
+        self.reputation_score = max(0, review_reputation + helpful_bonus + amenity_bonus + reported_penalty)
+        self.save(update_fields=['reputation_score'])
+    
+    def update_account_age(self):
+        """Update account age in days"""
+        if self.date_joined:
+            delta = timezone.now().date() - self.date_joined.date()
+            self.account_age_days = delta.days
+            self.save(update_fields=['account_age_days'])
 
 class Gym(models.Model):
     RATING_CHOICES = [(i, i) for i in range(1, 6)]
@@ -310,3 +336,265 @@ class PhotoReport(models.Model):
     
     def __str__(self):
         return f"Report by {self.reporter.username} on {self.photo}"
+
+
+class AmenityCategory(models.Model):
+    """Categories for gym amenities (e.g., Equipment, Facilities, Services)"""
+    name = models.CharField(max_length=50, unique=True)
+    description = models.TextField(blank=True)
+    icon = models.CharField(max_length=50, blank=True, help_text="Icon name for frontend")
+    sort_order = models.PositiveIntegerField(default=0)
+    
+    class Meta:
+        verbose_name_plural = "Amenity Categories"
+        ordering = ['sort_order', 'name']
+    
+    def __str__(self):
+        return self.name
+
+
+class Amenity(models.Model):
+    """Individual amenities that gyms can have - fully community-driven"""
+    name = models.CharField(max_length=100)
+    description = models.TextField(blank=True)
+    category = models.ForeignKey(AmenityCategory, on_delete=models.CASCADE, related_name='amenities')
+    icon = models.CharField(max_length=50, blank=True, help_text="Icon name for frontend")
+    is_active = models.BooleanField(default=True)
+    
+    # Community-driven suggestion system
+    suggested_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                   related_name='suggested_amenities')
+    suggestion_votes = models.PositiveIntegerField(default=0)
+    is_community_suggested = models.BooleanField(default=False)
+    
+    # Community-driven approval (based on usage and votes)
+    status = models.CharField(max_length=20, choices=[
+        ('pending', 'Pending Community Review'),
+        ('approved', 'Approved by Community'),
+        ('rejected', 'Rejected by Community'),
+    ], default='approved')  # Start approved, community can reject if unused
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        verbose_name_plural = "Amenities"
+        ordering = ['category__sort_order', 'category__name', 'name']
+        unique_together = ['name', 'category']
+    
+    def __str__(self):
+        return f"{self.category.name}: {self.name}"
+
+
+class GymAmenity(models.Model):
+    """Many-to-many relationship between gyms and amenities - fully community-driven"""
+    gym = models.ForeignKey(Gym, on_delete=models.CASCADE, related_name='gym_amenities')
+    amenity = models.ForeignKey(Amenity, on_delete=models.CASCADE, related_name='gym_amenities')
+    
+    # Community-driven confidence system
+    positive_votes = models.PositiveIntegerField(default=0)
+    negative_votes = models.PositiveIntegerField(default=0)
+    confidence_score = models.FloatField(default=0.0, help_text="Calculated confidence based on weighted assertions")
+    
+    # Community-driven status (no staff approval needed)
+    status = models.CharField(max_length=20, choices=[
+        ('pending', 'Pending Review'),
+        ('approved', 'Approved by Community'),
+        ('rejected', 'Rejected by Community'),
+        ('flagged', 'Flagged for Review'),
+    ], default='pending')
+    
+    # Community-driven verification (based on confidence thresholds)
+    is_verified = models.BooleanField(default=False, help_text="Verified by community consensus")
+    verified_at = models.DateTimeField(null=True, blank=True)
+    
+    # Additional details
+    notes = models.TextField(blank=True, help_text="Additional details about this amenity")
+    is_available = models.BooleanField(default=True, help_text="Currently available")
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = ['gym', 'amenity']
+        ordering = ['-confidence_score', 'amenity__category__sort_order', 'amenity__category__name', 'amenity__name']
+    
+    def __str__(self):
+        return f"{self.gym.name} - {self.amenity.name}"
+    
+    def update_confidence_score(self):
+        """Update confidence score based on weighted assertions"""
+        from django.db.models import Sum, Case, When, FloatField, Count
+        
+        # Get weighted assertions for this gym-amenity combination
+        assertions = GymAmenityAssertion.objects.filter(
+            gym=self.gym,
+            amenity=self.amenity
+        ).aggregate(
+            up=Sum(Case(When(has_amenity=True, then='weight'), default=0.0, output_field=FloatField())),
+            down=Sum(Case(When(has_amenity=False, then='weight'), default=0.0, output_field=FloatField())),
+            total_assertions=Count('id'),
+            distinct_users=Count('user', distinct=True)
+        )
+        
+        up_weight = assertions['up'] or 0.0
+        down_weight = assertions['down'] or 0.0
+        total_weight = up_weight + down_weight
+        
+        if total_weight == 0:
+            self.confidence_score = 0.0
+        else:
+            # Calculate confidence as ratio of positive weighted votes
+            self.confidence_score = up_weight / total_weight
+        
+        # Update vote counts for backward compatibility
+        self.positive_votes = int(up_weight)
+        self.negative_votes = int(down_weight)
+        
+        self.save(update_fields=['confidence_score', 'positive_votes', 'negative_votes'])
+        
+        return {
+            'confidence': self.confidence_score,
+            'up_weight': up_weight,
+            'down_weight': down_weight,
+            'total_assertions': assertions['total_assertions'],
+            'distinct_users': assertions['distinct_users']
+        }
+
+
+class AmenityVote(models.Model):
+    """User votes on gym amenities"""
+    VOTE_CHOICES = [
+        ('positive', 'Positive'),
+        ('negative', 'Negative'),
+    ]
+    
+    gym_amenity = models.ForeignKey(GymAmenity, on_delete=models.CASCADE, related_name='votes')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='amenity_votes')
+    vote_type = models.CharField(max_length=10, choices=VOTE_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        unique_together = ['gym_amenity', 'user']
+    
+    def __str__(self):
+        return f"{self.user.username} voted {self.vote_type} on {self.gym_amenity}"
+
+
+class GymAmenityAssertion(models.Model):
+    """User assertions about gym amenities - the raw crowd data"""
+    gym = models.ForeignKey(Gym, on_delete=models.CASCADE, related_name='amenity_assertions')
+    amenity = models.ForeignKey(Amenity, on_delete=models.CASCADE, related_name='gym_assertions')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='amenity_assertions')
+    has_amenity = models.BooleanField(help_text="User's assertion: does this gym have this amenity?")
+    weight = models.FloatField(default=1.0, help_text="Weight based on user reputation and account age")
+    notes = models.TextField(blank=True, help_text="Optional notes about the assertion")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = ['gym', 'amenity', 'user']
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f"{self.user.username} asserts {self.gym.name} {'has' if self.has_amenity else 'does not have'} {self.amenity.name}"
+    
+    def save(self, *args, **kwargs):
+        # Calculate weight based on user reputation and account age
+        self.weight = self.calculate_weight()
+        super().save(*args, **kwargs)
+    
+    def calculate_weight(self):
+        """Calculate assertion weight based on user reputation and account age"""
+        # Base weight
+        weight = 1.0
+        
+        # Account age bonus (older accounts are more trusted)
+        if self.user.account_age_days >= 30:
+            weight += 0.5
+        elif self.user.account_age_days >= 7:
+            weight += 0.2
+        
+        # Reputation bonus
+        if self.user.reputation_score >= 100:
+            weight += 1.0
+        elif self.user.reputation_score >= 50:
+            weight += 0.5
+        elif self.user.reputation_score >= 20:
+            weight += 0.2
+        
+        # Staff bonus
+        if self.user.is_staff:
+            weight += 2.0
+        
+        return max(0.1, weight)  # Minimum weight of 0.1
+
+
+class AmenityReport(models.Model):
+    """User reports about amenity accuracy"""
+    REPORT_TYPE_CHOICES = [
+        ('incorrect', 'Amenity Not Available'),
+        ('missing', 'Amenity Missing'),
+        ('outdated', 'Information Outdated'),
+        ('other', 'Other'),
+    ]
+    
+    gym_amenity = models.ForeignKey(GymAmenity, on_delete=models.CASCADE, related_name='reports')
+    reporter = models.ForeignKey(User, on_delete=models.CASCADE, related_name='amenity_reports')
+    report_type = models.CharField(max_length=20, choices=REPORT_TYPE_CHOICES)
+    description = models.TextField(blank=True)
+    status = models.CharField(max_length=20, choices=[
+        ('pending', 'Pending Review'),
+        ('reviewed', 'Reviewed'),
+        ('resolved', 'Resolved'),
+        ('dismissed', 'Dismissed'),
+    ], default='pending')
+    
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                  related_name='reviewed_amenity_reports')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        unique_together = ['gym_amenity', 'reporter']  # One report per user per amenity
+    
+    def __str__(self):
+        return f"Report by {self.reporter.username} on {self.gym_amenity}"
+
+
+class GymClaim(models.Model):
+    """Gym ownership claims by staff/owners"""
+    STATUS_CHOICES = [
+        ('pending', 'Pending Review'),
+        ('approved', 'Approved'),
+        ('rejected', 'Rejected'),
+        ('revoked', 'Revoked'),
+    ]
+    
+    gym = models.ForeignKey(Gym, on_delete=models.CASCADE, related_name='claims')
+    claimant = models.ForeignKey(User, on_delete=models.CASCADE, related_name='gym_claims')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    
+    # Claim details
+    business_name = models.CharField(max_length=200, blank=True)
+    contact_email = models.EmailField()
+    contact_phone = models.CharField(max_length=20, blank=True)
+    verification_documents = models.FileField(upload_to='verification_docs/', blank=True, null=True)
+    claim_notes = models.TextField(blank=True)
+    
+    # Review
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True,
+                                  related_name='reviewed_claims')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = ['gym', 'claimant']  # One claim per user per gym
+    
+    def __str__(self):
+        return f"{self.claimant.username} claims {self.gym.name}"

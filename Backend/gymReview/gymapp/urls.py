@@ -19,6 +19,13 @@ router.register(r'review-votes', views.ReviewVoteViewSet)
 # Photo likes are handled through the photos endpoint
 router.register(r'favorites', views.UserFavoriteViewSet)
 
+# Amenity Management
+router.register(r'amenity-categories', views.AmenityCategoryViewSet)
+router.register(r'amenities', views.AmenityViewSet)
+router.register(r'gym-amenities', views.GymAmenityViewSet)
+router.register(r'amenity-reports', views.AmenityReportViewSet)
+router.register(r'gym-claims', views.GymClaimViewSet)
+
 urlpatterns = [
     path('', include(router.urls)),
     
@@ -53,4 +60,13 @@ urlpatterns = [
     path('moderation/<int:pk>/approve/', views.PhotoModerationViewSet.as_view({'post': 'approve'}), name='approve_photo'),
     path('moderation/<int:pk>/reject/', views.PhotoModerationViewSet.as_view({'post': 'reject'}), name='reject_photo'),
     path('moderation/<int:pk>/flag/', views.PhotoModerationViewSet.as_view({'post': 'flag'}), name='flag_photo'),
+    
+    # Amenity Management Actions (Community-Driven)
+    path('gym-amenities/<int:pk>/assert/', views.GymAmenityViewSet.as_view({'post': 'assert_amenity'}), name='assert_amenity'),
+    path('gym-amenities/<int:pk>/flag/', views.GymAmenityViewSet.as_view({'post': 'flag'}), name='flag_amenity'),
+    path('amenity-reports/<int:pk>/review/', views.AmenityReportViewSet.as_view({'post': 'review'}), name='review_amenity_report'),
+    
+    # Gym Claims (Still need staff approval for legal reasons)
+    path('gym-claims/<int:pk>/approve/', views.GymClaimViewSet.as_view({'post': 'approve'}), name='approve_gym_claim'),
+    path('gym-claims/<int:pk>/reject/', views.GymClaimViewSet.as_view({'post': 'reject'}), name='reject_gym_claim'),
 ] 

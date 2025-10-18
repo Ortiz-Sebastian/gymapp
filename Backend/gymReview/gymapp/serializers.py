@@ -1,6 +1,8 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import Gym, Review, GymPhoto, ReviewVote, PhotoLike, UserFavorite, PhotoReport
+from .models import (Gym, Review, GymPhoto, ReviewVote, PhotoLike, UserFavorite, PhotoReport,
+                     AmenityCategory, Amenity, GymAmenity, AmenityReport, GymClaim, AmenityVote,
+                     GymAmenityAssertion)
 
 User = get_user_model()
 
@@ -104,9 +106,27 @@ class AdminGymPhotoSerializer(serializers.ModelSerializer):
         read_only_fields = ['uploaded_by', 'uploaded_at', 'likes_count', 
                            'auto_moderation_score', 'auto_moderation_flags']
 
+
+class GymAmenitySerializer(serializers.ModelSerializer):
+    amenity_name = serializers.ReadOnlyField(source='amenity.name')
+    amenity_category = serializers.ReadOnlyField(source='amenity.category.name')
+    added_by_username = serializers.ReadOnlyField(source='added_by.username')
+    verified_by_username = serializers.ReadOnlyField(source='verified_by.username')
+    
+    class Meta:
+        model = GymAmenity
+        fields = ['id', 'gym', 'amenity', 'amenity_name', 'amenity_category',
+                 'is_verified', 'added_by', 'added_by_username', 'verified_by', 'verified_by_username',
+                 'verified_at', 'positive_votes', 'negative_votes', 'confidence_score', 'status',
+                 'notes', 'is_available', 'created_at', 'updated_at']
+        read_only_fields = ['added_by', 'verified_by', 'verified_at', 'positive_votes', 'negative_votes', 
+                           'confidence_score', 'created_at', 'updated_at']
+
+
 class GymSerializer(serializers.ModelSerializer):
     reviews = ReviewSerializer(many=True, read_only=True)
     photos = GymPhotoSerializer(many=True, read_only=True)
+    amenities = GymAmenitySerializer(source='gym_amenities', many=True, read_only=True)
     
     # Average ratings for each category
     average_equipment_rating = serializers.SerializerMethodField()
@@ -123,7 +143,7 @@ class GymSerializer(serializers.ModelSerializer):
             'latitude', 'longitude', 'phone_number', 'website',
             'google_rating', 'google_user_ratings_total', 'photo_reference',
             'types', 'opening_hours', 'created_at', 'updated_at',
-            'reviews', 'photos',
+            'reviews', 'photos', 'amenities',
             'average_equipment_rating', 'average_cleanliness_rating',
             'average_staff_rating', 'average_value_rating',
             'average_atmosphere_rating', 'average_overall_rating'
@@ -175,3 +195,68 @@ class UserFavoriteSerializer(serializers.ModelSerializer):
         model = UserFavorite
         fields = ['id', 'user', 'gym', 'gym_name', 'created_at']
         read_only_fields = ['user', 'created_at']
+
+
+class AmenityCategorySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AmenityCategory
+        fields = ['id', 'name', 'description', 'icon', 'sort_order']
+
+
+class AmenitySerializer(serializers.ModelSerializer):
+    category_name = serializers.ReadOnlyField(source='category.name')
+    suggested_by_username = serializers.ReadOnlyField(source='suggested_by.username')
+    
+    class Meta:
+        model = Amenity
+        fields = ['id', 'name', 'description', 'category', 'category_name', 'icon', 'is_active',
+                 'suggested_by', 'suggested_by_username', 'suggestion_votes', 'is_community_suggested',
+                 'status', 'created_at']
+        read_only_fields = ['suggested_by', 'suggestion_votes', 'created_at']
+
+
+class AmenityVoteSerializer(serializers.ModelSerializer):
+    user = serializers.ReadOnlyField(source='user.username')
+    
+    class Meta:
+        model = AmenityVote
+        fields = ['id', 'gym_amenity', 'user', 'vote_type', 'created_at']
+        read_only_fields = ['user', 'created_at']
+
+
+class AmenityReportSerializer(serializers.ModelSerializer):
+    reporter_username = serializers.ReadOnlyField(source='reporter.username')
+    gym_name = serializers.ReadOnlyField(source='gym_amenity.gym.name')
+    amenity_name = serializers.ReadOnlyField(source='gym_amenity.amenity.name')
+    
+    class Meta:
+        model = AmenityReport
+        fields = ['id', 'gym_amenity', 'reporter', 'reporter_username', 'gym_name', 'amenity_name',
+                 'report_type', 'description', 'status', 'created_at']
+        read_only_fields = ['reporter', 'created_at', 'status']
+
+
+class GymClaimSerializer(serializers.ModelSerializer):
+    claimant_username = serializers.ReadOnlyField(source='claimant.username')
+    gym_name = serializers.ReadOnlyField(source='gym.name')
+    reviewed_by_username = serializers.ReadOnlyField(source='reviewed_by.username')
+    
+    class Meta:
+        model = GymClaim
+        fields = ['id', 'gym', 'gym_name', 'claimant', 'claimant_username', 'status',
+                 'business_name', 'contact_email', 'contact_phone', 'verification_documents',
+                 'claim_notes', 'reviewed_by', 'reviewed_by_username', 'reviewed_at',
+                 'review_notes', 'created_at', 'updated_at']
+        read_only_fields = ['claimant', 'reviewed_by', 'reviewed_at', 'created_at', 'updated_at']
+
+
+class GymAmenityAssertionSerializer(serializers.ModelSerializer):
+    user_username = serializers.ReadOnlyField(source='user.username')
+    gym_name = serializers.ReadOnlyField(source='gym.name')
+    amenity_name = serializers.ReadOnlyField(source='amenity.name')
+    
+    class Meta:
+        model = GymAmenityAssertion
+        fields = ['id', 'gym', 'amenity', 'user', 'user_username', 'gym_name', 'amenity_name',
+                 'has_amenity', 'weight', 'notes', 'created_at', 'updated_at']
+        read_only_fields = ['user', 'weight', 'created_at', 'updated_at']
