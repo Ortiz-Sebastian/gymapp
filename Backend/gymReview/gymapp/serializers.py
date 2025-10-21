@@ -55,7 +55,7 @@ class ReviewSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'user', 'gym',
             'equipment_rating', 'cleanliness_rating',
-            'staff_rating', 'value_rating', 'atmosphere_rating',
+            'staff_rating', 'value_rating', 'atmosphere_rating', 'programs_classes_rating',
             'overall_rating', 'review_text', 'review_photo', 'would_recommend',
             'helpful_votes', 'not_helpful_votes',
             'created_at', 'updated_at'
@@ -134,6 +134,7 @@ class GymSerializer(serializers.ModelSerializer):
     average_staff_rating = serializers.SerializerMethodField()
     average_value_rating = serializers.SerializerMethodField()
     average_atmosphere_rating = serializers.SerializerMethodField()
+    average_programs_classes_rating = serializers.SerializerMethodField()
     average_overall_rating = serializers.SerializerMethodField()
     
     class Meta:
@@ -146,7 +147,7 @@ class GymSerializer(serializers.ModelSerializer):
             'reviews', 'photos', 'amenities',
             'average_equipment_rating', 'average_cleanliness_rating',
             'average_staff_rating', 'average_value_rating',
-            'average_atmosphere_rating', 'average_overall_rating'
+            'average_atmosphere_rating', 'average_programs_classes_rating', 'average_overall_rating'
         ]
         read_only_fields = ['created_at', 'updated_at']
     
@@ -164,6 +165,9 @@ class GymSerializer(serializers.ModelSerializer):
     
     def get_average_atmosphere_rating(self, obj):
         return obj.avg_atmosphere_rating
+    
+    def get_average_programs_classes_rating(self, obj):
+        return obj.avg_programs_classes_rating
     
     def get_average_overall_rating(self, obj):
         return obj.overall_avg_rating

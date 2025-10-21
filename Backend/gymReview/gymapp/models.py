@@ -113,6 +113,13 @@ class Gym(models.Model):
         return 0
     
     @property
+    def avg_programs_classes_rating(self):
+        reviews = self.reviews.all()
+        if reviews:
+            return round(sum(review.programs_classes_rating for review in reviews) / len(reviews), 1)
+        return 0
+    
+    @property
     def overall_avg_rating(self):
         reviews = self.reviews.all()
         if reviews:
@@ -177,6 +184,7 @@ class Review(models.Model):
     staff_rating = models.IntegerField(choices=RATING_CHOICES)
     value_rating = models.IntegerField(choices=RATING_CHOICES)
     atmosphere_rating = models.IntegerField(choices=RATING_CHOICES)
+    programs_classes_rating = models.IntegerField(choices=RATING_CHOICES)
     
     # Review text (like Rate My Professor comments)
     review_text = models.TextField(blank=True, help_text="Share your detailed experience at this gym")
@@ -250,7 +258,8 @@ class Review(models.Model):
             self.cleanliness_rating,
             self.staff_rating,
             self.value_rating,
-            self.atmosphere_rating
+            self.atmosphere_rating,
+            self.programs_classes_rating
         ]
         return sum(ratings) / len(ratings)
 
