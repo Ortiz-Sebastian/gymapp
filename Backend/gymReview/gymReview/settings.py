@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 from pathlib import Path
 import os
 from decouple import config
+from celery.schedules import crontab
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -242,3 +243,23 @@ FRONTEND_URL = 'http://localhost:3000'  # Update this for production
 SECURE_BROWSER_XSS_FILTER = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = 'DENY'
+
+# Celery Configuration
+CELERY_BROKER_URL = config('CELERY_BROKER_URL', default='redis://localhost:6379/0')
+CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default='redis://localhost:6379/0')
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = 'UTC'
+
+# Celery Beat Schedule (for periodic tasks)
+CELERY_BEAT_SCHEDULE = {
+    'promote-amenities-nightly': {
+        'task': 'gymapp.tasks.promote_amenities_task',
+        'schedule': crontab(hour=2, minute=0),  # 2 AM daily
+    },
+    'update-user-reputations-daily': {
+        'task': 'gymapp.tasks.update_user_reputations_task',
+        'schedule': crontab(hour=1, minute=0),  # 1 AM daily
+    },
+}
