@@ -58,9 +58,9 @@ class Gym(models.Model):
     RATING_CHOICES = [(i, i) for i in range(1, 6)]
     
     # Using Google Places ID as primary key
-    place_id = models.CharField(max_length=255, primary_key=True)
+    place_id = models.CharField(primary_key=True)
     name = models.CharField(max_length=200)
-    address = models.CharField(max_length=300)
+    address = models.CharField(max_length=500)
     description = models.TextField(blank=True)
     latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
@@ -68,7 +68,7 @@ class Gym(models.Model):
     website = models.URLField(blank=True)
     google_rating = models.DecimalField(max_digits=2, decimal_places=1, null=True, blank=True)
     google_user_ratings_total = models.IntegerField(null=True, blank=True)
-    photo_reference = models.CharField(max_length=255, blank=True)
+    photo_reference = models.CharField(blank=True)
     types = models.JSONField(default=list, blank=True)  # Store Google Places types
     opening_hours = models.JSONField(null=True, blank=True)  # Store opening hours
     created_at = models.DateTimeField(auto_now_add=True)

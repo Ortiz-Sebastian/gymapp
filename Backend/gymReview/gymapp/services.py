@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 class GooglePlacesService:
     def __init__(self):
-        self.api_key = os.getenv('GOOGLE_PLACES_API_KEY')
+        self.api_key = settings.GOOGLE_PLACES_API_KEY
         self.base_url = 'https://maps.googleapis.com/maps/api/place'
         
     def search_gyms_nearby(self, latitude: float, longitude: float, radius: int = 5000) -> List[Dict]:
@@ -27,13 +27,13 @@ class GooglePlacesService:
         if not self.api_key:
             raise ValueError("Google Places API key not found. Set GOOGLE_PLACES_API_KEY environment variable.")
         
-        # Google Places API endpoint for nearby search
-        url = f"{self.base_url}/nearbysearch/json"
+        # Google Places API endpoint for text search
+        url = f"{self.base_url}/textsearch/json"
         
         params = {
+            'query': 'gym',
             'location': f"{latitude},{longitude}",
             'radius': radius,
-            'type': 'gym',
             'key': self.api_key
         }
         

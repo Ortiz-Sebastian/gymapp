@@ -54,11 +54,22 @@ class GymViewSet(viewsets.ModelViewSet):
     queryset = Gym.objects.all()
     serializer_class = GymSerializer
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    
+    def get_permissions(self):
+        """
+        Instantiates and returns the list of permissions that this view requires.
+        """
+        if self.action in ['nearby', 'search_google_places']:
+            permission_classes = [permissions.AllowAny]
+        else:
+            permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+        return [permission() for permission in permission_classes]
 
     @action(detail=False, methods=['get'])
     def nearby(self, request):
         """
-        Search for gyms within a certain radius of a location.
+        Search for gyms within a certain radius of a location (database only).
+        For Google Places API integration, use search_google_places endpoint.
         Required query parameters:
         - lat: latitude
         - lng: longitude
