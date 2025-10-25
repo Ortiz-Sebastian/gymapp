@@ -1,11 +1,36 @@
 import requests
 import os
 import logging
+import math
 from typing import List, Dict, Optional, Tuple
 from django.conf import settings
 from .models import Gym
 
 logger = logging.getLogger(__name__)
+
+def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """
+    Calculate the distance between two points in miles using the Haversine formula.
+    
+    Args:
+        lat1, lon1: First point coordinates
+        lat2, lon2: Second point coordinates
+        
+    Returns:
+        Distance in miles
+    """
+    # Convert latitude and longitude from degrees to radians
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    
+    # Haversine formula
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = math.sin(dlat/2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon/2)**2
+    c = 2 * math.asin(math.sqrt(a))
+    
+    # Radius of earth in miles
+    r = 3959
+    return c * r
 
 class GooglePlacesService:
     def __init__(self):
@@ -14,7 +39,7 @@ class GooglePlacesService:
         
     def search_gyms_nearby(self, latitude: float, longitude: float, radius: int = 5000) -> List[Dict]:
         """
-        Search for gyms near a location using Google Places API
+        Search for gyms near a location using Google Places API with multiple search terms
         
         Args:
             latitude: Latitude of the search center
@@ -22,30 +47,120 @@ class GooglePlacesService:
             radius: Search radius in meters (default: 5000m = ~3 miles)
             
         Returns:
-            List of gym data from Google Places API
+            List of gym data from Google Places API within the specified radius
         """
+        # Convert radius from meters to miles for distance calculation
+        radius_miles = radius * 0.000621371
         if not self.api_key:
             raise ValueError("Google Places API key not found. Set GOOGLE_PLACES_API_KEY environment variable.")
         
         # Google Places API endpoint for text search
         url = f"{self.base_url}/textsearch/json"
         
-        params = {
-            'query': 'gym',
-            'location': f"{latitude},{longitude}",
-            'radius': radius,
-            'key': self.api_key
-        }
+        # Focused search terms for traditional gyms that fit your rating system
+        search_terms = [
+            # General traditional gym terms
+            'gym',
+            'fitness center',
+            'fitness club',
+            'health club',
+            'sports club',
+            
+            # Core gym activities
+            'weightlifting',
+            'weight training',
+            'strength training',
+            'cardio',
+            'workout',
+            'exercise',
+            
+            # Major gym chains
+            'planet fitness',
+            'la fitness',
+            '24 hour fitness',
+            'anytime fitness',
+            'crunch fitness',
+            'equinox',
+            'lifetime fitness',
+            'golds gym',
+            'snap fitness',
+            'world gym',
+            'retro fitness',
+            'youfit',
+            'blink fitness',
+            'esporta fitness',
+            'xperience fitness',
+            'vasa fitness',
+            'in-shape health clubs',
+            'fitness 19',
+            'workout anytime',
+            'fitworks',
+            'metroflex gym',
+            'powerhouse gym',
+            'iron paradise',
+            'hardcore gym',
+            'bodybuilding gym',
+            'weight room',
+            'strength and conditioning',
+            'fitness studio',
+            'training center'
+        ]
+        
+        all_results = []
+        seen_place_ids = set()
         
         try:
-            response = requests.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            
-            if data.get('status') != 'OK':
-                raise Exception(f"Google Places API error: {data.get('status')}")
+            for term in search_terms:
+                params = {
+                    'query': term,
+                    'location': f"{latitude},{longitude}",
+                    'radius': radius,
+                    'key': self.api_key
+                }
                 
-            return data.get('results', [])
+                response = requests.get(url, params=params)
+                response.raise_for_status()
+                data = response.json()
+                
+                if data.get('status') != 'OK':
+                    continue  # Skip this term if there's an error
+                
+                results = data.get('results', [])
+                
+                # Add unique results (avoid duplicates)
+                for result in results:
+                    place_id = result.get('place_id')
+                    if place_id and place_id not in seen_place_ids:
+                        all_results.append(result)
+                        seen_place_ids.add(place_id)
+                
+                # Stop if we have enough results (focused on traditional gyms)
+                if len(all_results) >= 150:  # Reasonable limit for traditional gyms
+                    break
+            
+            # Filter results by actual distance to ensure they're within the specified radius
+            filtered_results = []
+            for result in all_results:
+                try:
+                    # Get gym coordinates
+                    gym_lat = result.get('geometry', {}).get('location', {}).get('lat')
+                    gym_lng = result.get('geometry', {}).get('location', {}).get('lng')
+                    
+                    if gym_lat and gym_lng:
+                        # Calculate distance from user location to gym
+                        distance = calculate_distance(latitude, longitude, gym_lat, gym_lng)
+                        
+                        # Only include gyms within the specified radius
+                        if distance <= radius_miles:
+                            # Add distance to the result for frontend use
+                            result['distance_miles'] = round(distance, 2)
+                            filtered_results.append(result)
+                            
+                except (TypeError, ValueError) as e:
+                    # Skip results with invalid coordinates
+                    continue
+                    
+            return filtered_results
             
         except requests.RequestException as e:
             raise Exception(f"Error calling Google Places API: {str(e)}")
