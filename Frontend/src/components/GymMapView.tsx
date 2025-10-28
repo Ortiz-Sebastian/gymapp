@@ -31,7 +31,7 @@ const GymMapView: React.FC<GymMapViewProps> = ({
 }) => {
   const [mapElement, setMapElement] = useState<HTMLDivElement | null>(null);
   const [map, setMap] = useState<google.maps.Map | null>(null);
-  const [markers, setMarkers] = useState<google.maps.Marker[]>([]);
+  const markersRef = useRef<google.maps.Marker[]>([]);
   const [isMapLoaded, setIsMapLoaded] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
 
@@ -137,6 +137,7 @@ const GymMapView: React.FC<GymMapViewProps> = ({
     console.log('GymMapView: Gym markers effect triggered');
     console.log('GymMapView: map:', !!map);
     console.log('GymMapView: gyms.length:', gyms.length);
+    console.log('GymMapView: markersRef.current.length:', markersRef.current.length);
     
     if (!map || !gyms.length) {
       console.log('GymMapView: Skipping marker update - no map or no gyms');
@@ -145,11 +146,18 @@ const GymMapView: React.FC<GymMapViewProps> = ({
 
     console.log('GymMapView: Updating markers with', gyms.length, 'gyms');
     
-    // Clear existing markers
-    markers.forEach(marker => marker.setMap(null));
-    setMarkers([]);
+    // Clear existing markers first
+    if (markersRef.current.length > 0) {
+      console.log('GymMapView: Clearing', markersRef.current.length, 'existing markers');
+      markersRef.current.forEach(marker => {
+        marker.setMap(null);
+        google.maps.event.clearInstanceListeners(marker);
+      });
+      markersRef.current = [];
+    }
 
     // Create new markers
+    console.log('GymMapView: Creating new markers');
     const newMarkers = gyms.map((gym) => {
       const marker = new google.maps.Marker({
         position: { lat: gym.latitude, lng: gym.longitude },
@@ -173,7 +181,7 @@ const GymMapView: React.FC<GymMapViewProps> = ({
       return marker;
     });
 
-    setMarkers(newMarkers);
+    markersRef.current = newMarkers;
     console.log('GymMapView: Created', newMarkers.length, 'markers');
 
     // Fit bounds to show all markers

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import LocationPermission from './LocationPermission';
 import RadiusSelector from './RadiusSelector';
 import GymListView from './GymListView';
@@ -28,7 +28,9 @@ const HomePage: React.FC = () => {
   const [gyms, setGyms] = useState<Gym[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [radius, setRadius] = useState(20);
+  const [radius, setRadius] = useState(10);
+  const [maxSearchRadius, setMaxSearchRadius] = useState<number | null>(null);
+  const [cachedGyms, setCachedGyms] = useState<Array<{place_id: string, distance_miles: number}>>([]); // Track place_ids with distances from user location
   const [viewMode, setViewMode] = useState<'list' | 'map'>('list');
   const [showLocationPermission, setShowLocationPermission] = useState(true);
 
@@ -49,7 +51,9 @@ const HomePage: React.FC = () => {
           body: JSON.stringify({
             latitude: coords.latitude,
             longitude: coords.longitude,
-            radius: searchRadius
+            radius: searchRadius,
+            max_cached_radius: maxSearchRadius,
+            cached_gyms: cachedGyms
           })
         }
       );
@@ -68,6 +72,21 @@ const HomePage: React.FC = () => {
             google_user_ratings_total: gym.google_user_ratings_total ? parseInt(gym.google_user_ratings_total) : undefined,
           }));
           setGyms(processedGyms);
+          
+          // Update max search radius only if it was an API call (not from cache)
+          const isFromCache = data.message?.includes('from cache');
+          if (!isFromCache) {
+            // Update max radius if this search was larger
+            if (!maxSearchRadius || searchRadius > maxSearchRadius) {
+              setMaxSearchRadius(searchRadius);
+              // Store place_ids with distances for this max radius search
+              const gymsWithDistances = processedGyms.map((gym: Gym) => ({
+                place_id: gym.place_id,
+                distance_miles: gym.distance_miles || 0
+              }));
+              setCachedGyms(gymsWithDistances);
+            }
+          }
     } catch (err) {
       console.error('Error fetching gyms:', err);
       setError(err instanceof Error ? err.message : 'Failed to fetch gyms');
@@ -194,6 +213,7 @@ const HomePage: React.FC = () => {
             />
           ) : (
             <GymMapView
+              key={`${radius}-${gyms.length}`} // Force remount when radius or gym count changes
               gyms={gyms}
               userLocation={userLocation!}
               loading={loading}
@@ -204,7 +224,7 @@ const HomePage: React.FC = () => {
         </div>
 
         {/* Debug info (remove in production) */}
-        {process.env.NODE_ENV === 'development' && (
+        {import.meta.env.DEV && (
           <div className="mt-8 p-4 bg-gray-100 rounded-lg">
             <h3 className="text-sm font-medium text-gray-700 mb-2">Debug Info:</h3>
             <pre className="text-xs text-gray-600 overflow-auto">

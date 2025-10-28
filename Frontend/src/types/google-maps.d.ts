@@ -46,6 +46,10 @@ declare global {
         BACKWARD_OPEN_ARROW = 4
       }
 
+      namespace event {
+        function clearInstanceListeners(instance: any): void;
+      }
+
       interface MapOptions {
         center?: LatLng | LatLngLiteral;
         zoom?: number;
