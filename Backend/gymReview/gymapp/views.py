@@ -18,7 +18,7 @@ from .serializers import (GymSerializer, ReviewSerializer, UserSerializer,
                          AmenityCategorySerializer, AmenitySerializer, GymAmenitySerializer,
                          AmenityReportSerializer, GymClaimSerializer, AmenityVoteSerializer,
                          GymAmenityAssertionSerializer)
-from .services import GooglePlacesService, GeocodingService, LocationValidationService, ImageModerationService
+from .services import GooglePlacesService, GeocodingService, LocationValidationService, ImageModerationService, calculate_distance
 
 User = get_user_model()
 
@@ -176,15 +176,20 @@ class GymViewSet(viewsets.ModelViewSet):
     def search_google_places(self, request):
         """
         Search for gyms using Google Places API and save them to database.
+        Smart caching: if searching smaller radius than max cached, filter cached data instead of calling API.
         Required parameters:
         - latitude: latitude of search center
         - longitude: longitude of search center
-        - radius: search radius in miles (default: 5)
+        - radius: search radius in miles (default: 10)
+        - max_cached_radius: maximum radius already searched and cached (optional)
+        - cached_gyms: list of dicts with place_id and distance_miles from max radius search (optional)
         """
         try:
             latitude = float(request.data.get('latitude'))
             longitude = float(request.data.get('longitude'))
-            radius_miles = float(request.data.get('radius', 5))  # Default 5 miles
+            radius_miles = float(request.data.get('radius', 10))  # Default 10 miles
+            max_cached_radius = request.data.get('max_cached_radius')
+            cached_gyms = request.data.get('cached_gyms', [])  # List of {place_id, distance_miles} from max radius
         except (TypeError, ValueError):
             return Response(
                 {'error': 'Invalid latitude, longitude, or radius'},
@@ -195,8 +200,54 @@ class GymViewSet(viewsets.ModelViewSet):
         radius_meters = int(radius_miles * 1609.34)
         
         try:
-            # Initialize Google Places service
             places_service = GooglePlacesService()
+            
+            # Check if we can use cached data (searching smaller radius than max cached)
+            # We use cache only when narrowing the radius to avoid stale data
+            use_cache = False
+            if max_cached_radius:
+                try:
+                    max_radius = float(max_cached_radius)
+                    # Only use cache if new radius is STRICTLY smaller (not equal)
+                    # This ensures we refresh data when selecting the same or larger radius
+                    if radius_miles <= max_radius:
+                        use_cache = True
+                        print(f"Using cache: searching {radius_miles} miles (max cached: {max_radius} miles)")
+                except (ValueError, TypeError):
+                    pass
+            
+            if use_cache and cached_gyms:
+                # Filter cached gyms by distance already calculated from max radius
+                # cached_gyms is a list of {place_id, distance_miles} dicts
+                valid_place_ids = [
+                    gym['place_id'] for gym in cached_gyms 
+                    if gym.get('distance_miles', float('inf')) <= radius_miles
+                ]
+                
+                # Get all gyms with those place_ids from database
+                gyms_from_db = Gym.objects.filter(place_id__in=valid_place_ids)
+                
+                # Serialize and add stored distance
+                filtered_gyms = []
+                distance_map = {gym['place_id']: gym.get('distance_miles', 0) for gym in cached_gyms}
+                
+                for gym in gyms_from_db:
+                    gym_data = self.get_serializer(gym).data
+                    gym_data['distance_miles'] = round(distance_map.get(gym.place_id, 0), 2)
+                    filtered_gyms.append(gym_data)
+                
+                # Sort by distance
+                filtered_gyms.sort(key=lambda x: x.get('distance_miles', float('inf')))
+                
+                print(f"Cache filter: Found {len(filtered_gyms)} gyms within {radius_miles} miles from {len(cached_gyms)} cached gyms")
+                
+                return Response({
+                    'message': f'Found {len(filtered_gyms)} gyms within {radius_miles} miles (from cache)',
+                    'gyms': filtered_gyms
+                }, status=status.HTTP_200_OK)
+            
+            # Otherwise, call the API
+            print(f"Calling Google Places API with radius: {radius_miles} miles")
             
             # Search for gyms
             places_data = places_service.search_gyms_nearby(
@@ -231,8 +282,20 @@ class GymViewSet(viewsets.ModelViewSet):
                         print(f"Error creating gym {place_id}: {str(e)}")
                         continue
             
-            # Serialize and return the gyms
+            # Serialize and add distance from user location to each gym
             serializer = self.get_serializer(created_gyms, many=True)
+            gyms_data = serializer.data
+            
+            # Add distance from user location to each gym
+            for gym_data in gyms_data:
+                gym_obj = next((g for g in created_gyms if g.place_id == gym_data['place_id']), None)
+                if gym_obj and gym_obj.latitude and gym_obj.longitude:
+                    distance = calculate_distance(
+                        latitude, longitude,
+                        float(gym_obj.latitude), float(gym_obj.longitude)
+                    )
+                    gym_data['distance_miles'] = round(distance, 2)
+            
             return Response({
                 'message': f'Found {len(created_gyms)} gyms in the area',
                 'summary': {
@@ -240,7 +303,7 @@ class GymViewSet(viewsets.ModelViewSet):
                     'new_gyms_added': new_gyms_count,
                     'existing_gyms_found': existing_gyms_count
                 },
-                'gyms': serializer.data
+                'gyms': gyms_data
             }, status=status.HTTP_200_OK)
             
         except Exception as e:

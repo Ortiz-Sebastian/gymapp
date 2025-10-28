@@ -54,27 +54,15 @@ class GooglePlacesService:
         if not self.api_key:
             raise ValueError("Google Places API key not found. Set GOOGLE_PLACES_API_KEY environment variable.")
         
-        # Google Places API endpoint for text search
-        url = f"{self.base_url}/textsearch/json"
+        # Google Places API endpoint for nearby search
+        url = f"{self.base_url}/nearbysearch/json"
         
-        # Focused search terms for traditional gyms that fit your rating system
+        # Use fewer, more effective search terms for speed
         search_terms = [
-            # General traditional gym terms
             'gym',
-            'fitness center',
+            'fitness center', 
             'fitness club',
             'health club',
-            'sports club',
-            
-            # Core gym activities
-            'weightlifting',
-            'weight training',
-            'strength training',
-            'cardio',
-            'workout',
-            'exercise',
-            
-            # Major gym chains
             'planet fitness',
             'la fitness',
             '24 hour fitness',
@@ -83,38 +71,27 @@ class GooglePlacesService:
             'equinox',
             'lifetime fitness',
             'golds gym',
-            'snap fitness',
-            'world gym',
-            'retro fitness',
-            'youfit',
-            'blink fitness',
-            'esporta fitness',
-            'xperience fitness',
-            'vasa fitness',
-            'in-shape health clubs',
-            'fitness 19',
-            'workout anytime',
-            'fitworks',
-            'metroflex gym',
-            'powerhouse gym',
-            'iron paradise',
-            'hardcore gym',
-            'bodybuilding gym',
-            'weight room',
-            'strength and conditioning',
-            'fitness studio',
-            'training center'
+            'weightlifting',
+            'strength training',
+            'snap fitness',  # Popular chain
+            'blink fitness',  # Popular chain
+            'workout',       # Broader activity term
+            'crossfit'       # Popular fitness trend
         ]
         
         all_results = []
         seen_place_ids = set()
         
         try:
+            # Search terms sequentially but with limited pagination for speed
             for term in search_terms:
+                print(f"Searching for '{term}'...")
+                # First page of results
                 params = {
-                    'query': term,
                     'location': f"{latitude},{longitude}",
                     'radius': radius,
+                    'keyword': term,
+                    'type': 'gym',
                     'key': self.api_key
                 }
                 
@@ -134,11 +111,51 @@ class GooglePlacesService:
                         all_results.append(result)
                         seen_place_ids.add(place_id)
                 
-                # Stop if we have enough results (focused on traditional gyms)
-                if len(all_results) >= 150:  # Reasonable limit for traditional gyms
-                    break
+                # Follow pagination for 2 more pages per term (3 pages total = ~60 results)
+                page_count = 1
+                next_page_token = data.get('next_page_token')
+                while next_page_token and page_count < 3:  # 2 additional pages per term
+                    page_count += 1
+                    print(f"Fetching page {page_count} for '{term}'...")
+                    
+                    params = {
+                        'pagetoken': next_page_token,
+                        'key': self.api_key
+                    }
+                    
+                    response = requests.get(url, params=params)
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    if data.get('status') != 'OK':
+                        break  # Stop if there's an error
+                    
+                    results = data.get('results', [])
+                    
+                    # Add unique results
+                    for result in results:
+                        place_id = result.get('place_id')
+                        if place_id and place_id not in seen_place_ids:
+                            all_results.append(result)
+                            seen_place_ids.add(place_id)
+                    
+                    next_page_token = data.get('next_page_token')
             
             # Filter results by actual distance to ensure they're within the specified radius
+            print(f"Total gyms from API before filtering: {len(all_results)}")
+            
+            # If we got close to 60 per search term, try grid strategy as fallback
+            if len(all_results) >= 60 * len(search_terms) * 0.9:  # If we got ~90% of max per term
+                print("Detected high number of results, trying grid strategy as fallback...")
+                grid_results = self._grid_search(latitude, longitude, radius)
+                # Merge grid results with existing results
+                for result in grid_results:
+                    place_id = result.get('place_id')
+                    if place_id and place_id not in seen_place_ids:
+                        all_results.append(result)
+                        seen_place_ids.add(place_id)
+                print(f"Total gyms after grid search: {len(all_results)}")
+            
             filtered_results = []
             for result in all_results:
                 try:
@@ -159,11 +176,86 @@ class GooglePlacesService:
                 except (TypeError, ValueError) as e:
                     # Skip results with invalid coordinates
                     continue
+            
+            # Sort by distance to ensure consistent ordering across requests
+            filtered_results.sort(key=lambda x: x.get('distance_miles', float('inf')))
+            
+            print(f"Gyms after distance filtering: {len(filtered_results)}")
+            print(f"Radius in miles: {radius_miles}")
                     
             return filtered_results
             
         except requests.RequestException as e:
             raise Exception(f"Error calling Google Places API: {str(e)}")
+    
+    def _grid_search(self, latitude: str, longitude: str, radius: int) -> List[Dict]:
+        """
+        Grid-based search to bypass the 60 result limit per query.
+        Splits the search area into a grid and searches each cell.
+        """
+        import math
+        
+        center_lat = float(latitude)
+        center_lng = float(longitude)
+        radius_miles = radius * 0.000621371
+        
+        # Calculate bounding box for the circle
+        # Each degree of latitude is ~69 miles
+        degrees_per_mile = 1 / 69.0
+        lat_delta = radius_miles * degrees_per_mile
+        
+        # Longitude degrees vary by latitude, approximate
+        lng_delta = radius_miles * degrees_per_mile / math.cos(math.radians(center_lat))
+        
+        # Create a 3x3 grid (9 cells) with some overlap
+        grid_size = 3
+        cell_lat_step = lat_delta * 2 / grid_size
+        cell_lng_step = lng_delta * 2 / grid_size
+        
+        all_results = []
+        seen_place_ids = set()
+        
+        url = f"{self.base_url}/nearbysearch/json"
+        search_terms = ['gym', 'fitness center', 'fitness club', 'health club']
+        
+        for term in search_terms:
+            for i in range(grid_size):
+                for j in range(grid_size):
+                    # Calculate cell center
+                    cell_lat = center_lat + (i - grid_size/2) * cell_lat_step
+                    cell_lng = center_lng + (j - grid_size/2) * cell_lng_step
+                    
+                    # Use a radius that covers the cell corners
+                    cell_radius = int(math.sqrt(cell_lat_step**2 + cell_lng_step**2) * 69 * 1609.34)  # Convert to meters
+                    
+                    params = {
+                        'location': f"{cell_lat},{cell_lng}",
+                        'radius': cell_radius,
+                        'keyword': term,
+                        'type': 'gym',
+                        'key': self.api_key
+                    }
+                    
+                    try:
+                        response = requests.get(url, params=params)
+                        response.raise_for_status()
+                        data = response.json()
+                        
+                        if data.get('status') != 'OK':
+                            continue
+                        
+                        results = data.get('results', [])
+                        for result in results:
+                            place_id = result.get('place_id')
+                            if place_id and place_id not in seen_place_ids:
+                                all_results.append(result)
+                                seen_place_ids.add(place_id)
+                                
+                    except requests.RequestException:
+                        continue
+        
+        print(f"Grid search found {len(all_results)} unique gyms")
+        return all_results
     
     def get_place_details(self, place_id: str) -> Optional[Dict]:
         """
