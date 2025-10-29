@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import LocationPermission from './LocationPermission';
 import RadiusSelector from './RadiusSelector';
 import GymListView from './GymListView';
@@ -29,16 +29,18 @@ const HomePage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [radius, setRadius] = useState(10);
-  const [maxSearchRadius, setMaxSearchRadius] = useState<number | null>(null);
-  const [cachedGyms, setCachedGyms] = useState<Array<{place_id: string, distance_miles: number}>>([]); // Track place_ids with distances from user location
+  const [searchText, setSearchText] = useState(''); // Text search for gym names/brands
+  const [searchId, setSearchId] = useState(0); // Unique ID to force map updates
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [viewMode, setViewMode] = useState<'list' | 'map'>('list');
   const [showLocationPermission, setShowLocationPermission] = useState(true);
 
   const API_BASE_URL = 'http://localhost:8000/api'; // Adjust this to your Django backend URL
 
-  const fetchGyms = async (coords: LocationCoords, searchRadius: number) => {
+  const fetchGyms = async (coords: LocationCoords, searchRadius: number, searchQuery: string = '') => {
     setLoading(true);
     setError(null);
+    setSearchId(prev => prev + 1); // Increment search ID to force map updates
 
     try {
       const response = await fetch(
@@ -52,8 +54,7 @@ const HomePage: React.FC = () => {
             latitude: coords.latitude,
             longitude: coords.longitude,
             radius: searchRadius,
-            max_cached_radius: maxSearchRadius,
-            cached_gyms: cachedGyms
+            search_text: searchQuery
           })
         }
       );
@@ -73,20 +74,8 @@ const HomePage: React.FC = () => {
           }));
           setGyms(processedGyms);
           
-          // Update max search radius only if it was an API call (not from cache)
-          const isFromCache = data.message?.includes('from cache');
-          if (!isFromCache) {
-            // Update max radius if this search was larger
-            if (!maxSearchRadius || searchRadius > maxSearchRadius) {
-              setMaxSearchRadius(searchRadius);
-              // Store place_ids with distances for this max radius search
-              const gymsWithDistances = processedGyms.map((gym: Gym) => ({
-                place_id: gym.place_id,
-                distance_miles: gym.distance_miles || 0
-              }));
-              setCachedGyms(gymsWithDistances);
-            }
-          }
+          // Frontend caching disabled - rely on backend H3 cache for consistency
+          // This ensures consistent results between different radius searches
     } catch (err) {
       console.error('Error fetching gyms:', err);
       setError(err instanceof Error ? err.message : 'Failed to fetch gyms');
@@ -98,7 +87,7 @@ const HomePage: React.FC = () => {
   const handleLocationGranted = (coords: LocationCoords) => {
     setUserLocation(coords);
     setShowLocationPermission(false);
-    fetchGyms(coords, radius);
+    fetchGyms(coords, radius, searchText);
   };
 
   const handleLocationDenied = () => {
@@ -110,7 +99,7 @@ const HomePage: React.FC = () => {
   const handleRadiusChange = (newRadius: number) => {
     setRadius(newRadius);
     if (userLocation) {
-      fetchGyms(userLocation, newRadius);
+      fetchGyms(userLocation, newRadius, searchText);
     }
   };
 
@@ -121,9 +110,34 @@ const HomePage: React.FC = () => {
 
   const handleRefresh = () => {
     if (userLocation) {
-      fetchGyms(userLocation, radius);
+      fetchGyms(userLocation, radius, searchText);
     }
   };
+
+  // Debounced live search: trigger search after 500ms delay
+  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  
+  useEffect(() => {
+    // Clear previous timeout
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current);
+    }
+    
+    // Search if user has granted location and not currently loading
+    // Handle both empty search (show all gyms) and non-empty search
+    if (userLocation && !loading) {
+      searchTimeoutRef.current = setTimeout(() => {
+        fetchGyms(userLocation, radius, searchText);
+      }, 500); // 500ms delay
+    }
+    
+    // Cleanup on unmount
+    return () => {
+      if (searchTimeoutRef.current) {
+        clearTimeout(searchTimeoutRef.current);
+      }
+    };
+  }, [searchText]); // Only trigger on searchText changes
 
   if (showLocationPermission) {
     return (
@@ -151,45 +165,84 @@ const HomePage: React.FC = () => {
 
         {/* Controls */}
         <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between space-y-4 sm:space-y-0">
-            <div className="flex items-center space-x-4">
-              <RadiusSelector
-                selectedRadius={radius}
-                onRadiusChange={handleRadiusChange}
-              />
-              <button
-                onClick={handleRefresh}
-                disabled={loading}
-                className="bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white px-4 py-2 rounded-md text-sm font-medium transition-colors"
-              >
-                {loading ? 'Searching...' : 'Refresh'}
-              </button>
-            </div>
-
-            <div className="flex items-center space-x-2">
-              <span className="text-sm text-gray-700">View:</span>
-              <div className="flex bg-gray-100 rounded-md p-1">
+          <div className="space-y-4">
+            {/* Radius and Refresh Button Row */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <RadiusSelector
+                  selectedRadius={radius}
+                  onRadiusChange={handleRadiusChange}
+                  disabled={loading}
+                />
                 <button
-                  onClick={() => setViewMode('list')}
-                  className={`px-3 py-1 text-sm font-medium rounded transition-colors ${
-                    viewMode === 'list'
-                      ? 'bg-white text-gray-900 shadow-sm'
-                      : 'text-gray-500 hover:text-gray-700'
-                  }`}
+                  onClick={handleRefresh}
+                  disabled={loading}
+                  className="bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white px-6 py-3 rounded-lg text-base font-medium transition-colors whitespace-nowrap"
+                  title="Refresh gym results"
                 >
-                  List
-                </button>
-                <button
-                  onClick={() => setViewMode('map')}
-                  className={`px-3 py-1 text-sm font-medium rounded transition-colors ${
-                    viewMode === 'map'
-                      ? 'bg-white text-gray-900 shadow-sm'
-                      : 'text-gray-500 hover:text-gray-700'
-                  }`}
-                >
-                  Map
+                  {loading ? 'Refreshing...' : 'Refresh'}
                 </button>
               </div>
+              
+              {/* View Mode Toggle */}
+              <div className="flex items-center space-x-2">
+                <span className="text-sm text-gray-700">View:</span>
+                <div className="flex bg-gray-100 rounded-md p-1">
+                  <button
+                    onClick={() => setViewMode('list')}
+                    className={`px-3 py-1 text-sm font-medium rounded transition-colors ${
+                      viewMode === 'list'
+                        ? 'bg-white text-gray-900 shadow-sm'
+                        : 'text-gray-600 hover:text-gray-900'
+                    }`}
+                  >
+                    List
+                  </button>
+                  <button
+                    onClick={() => setViewMode('map')}
+                    className={`px-3 py-1 text-sm font-medium rounded transition-colors ${
+                      viewMode === 'map'
+                        ? 'bg-white text-gray-900 shadow-sm'
+                        : 'text-gray-600 hover:text-gray-900'
+                    }`}
+                  >
+                    Map
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Search Bar Row */}
+            <div className="w-full max-w-4xl mx-auto">
+              <input
+                ref={searchInputRef}
+                type="text"
+                placeholder={loading ? "Searching..." : "Search gyms (e.g., Planet Fitness, CrossFit)..."}
+                value={searchText}
+                onChange={(e) => {
+                  if (!loading) {
+                    setSearchText(e.target.value);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && userLocation && !loading) {
+                    fetchGyms(userLocation, radius, searchText);
+                  }
+                }}
+                className={`w-full px-6 py-4 text-xl border-2 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent shadow-sm transition-colors ${
+                  loading 
+                    ? 'border-gray-200 bg-gray-50 text-gray-400' 
+                    : 'border-gray-300 bg-white text-gray-900'
+                }`}
+              />
+              {loading && (
+                <div className="mt-2 text-sm text-gray-500 text-center">
+                  <div className="flex items-center justify-center">
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600 mr-2"></div>
+                    Searching for gyms...
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -210,10 +263,11 @@ const HomePage: React.FC = () => {
               loading={loading}
               error={error}
               onGymClick={handleGymClick}
+              searchText={searchText}
             />
           ) : (
             <GymMapView
-              key={`${radius}-${gyms.length}`} // Force remount when radius or gym count changes
+              key={`${radius}-${userLocation?.latitude}-${userLocation?.longitude}-${searchId}`} // Include searchId to force updates
               gyms={gyms}
               userLocation={userLocation!}
               loading={loading}

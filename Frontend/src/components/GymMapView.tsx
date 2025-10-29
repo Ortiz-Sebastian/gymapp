@@ -184,18 +184,28 @@ const GymMapView: React.FC<GymMapViewProps> = ({
     markersRef.current = newMarkers;
     console.log('GymMapView: Created', newMarkers.length, 'markers');
 
-    // Fit bounds to show all markers
+    // Fit bounds to show all markers (only if we're not in the middle of updates)
     if (newMarkers.length > 0) {
       try {
         const bounds = new google.maps.LatLngBounds();
         newMarkers.forEach(marker => {
-          bounds.extend(marker.getPosition()!);
+          const pos = marker.getPosition();
+          if (pos) bounds.extend(pos);
         });
         bounds.extend(new google.maps.LatLng(userLocation.latitude, userLocation.longitude));
+        
+        // Only fit bounds if we have valid positions
         map.fitBounds(bounds);
         console.log('GymMapView: Fitted bounds to show all markers');
       } catch (error) {
         console.error('GymMapView: Error fitting bounds:', error);
+        // Fallback: just center on user location if bounds fitting fails
+        try {
+          const center = new google.maps.LatLng(userLocation.latitude, userLocation.longitude);
+          map.setCenter(center);
+        } catch (err) {
+          console.error('GymMapView: Error setting center:', err);
+        }
       }
     }
   }, [map, gyms, userLocation, onGymClick]);
@@ -237,8 +247,6 @@ const GymMapView: React.FC<GymMapViewProps> = ({
   }
 
   // Don't return early - always render the map div
-
-  console.log('GymMapView: Rendering component, mapElement:', !!mapElement);
   
   return (
     <div className="bg-white rounded-lg shadow-md overflow-hidden">

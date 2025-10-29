@@ -5,10 +5,11 @@ declare global {
 
   namespace google {
     namespace maps {
-      class Map {
-        constructor(mapDiv: Element | null, opts?: MapOptions);
-        fitBounds(bounds: LatLngBounds): void;
-      }
+            class Map {
+              constructor(mapDiv: Element | null, opts?: MapOptions);
+              fitBounds(bounds: LatLngBounds): void;
+              setCenter(latLng: LatLng): void;
+            }
 
       class Marker {
         constructor(opts?: MarkerOptions);

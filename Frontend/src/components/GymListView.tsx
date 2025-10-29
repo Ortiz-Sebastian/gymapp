@@ -19,6 +19,7 @@ interface GymListViewProps {
   loading: boolean;
   error: string | null;
   onGymClick?: (gym: Gym) => void;
+  searchText?: string;
 }
 
 const GymListView: React.FC<GymListViewProps> = ({
@@ -26,6 +27,7 @@ const GymListView: React.FC<GymListViewProps> = ({
   loading,
   error,
   onGymClick,
+  searchText,
 }) => {
   if (loading) {
     return (
@@ -85,9 +87,21 @@ const GymListView: React.FC<GymListViewProps> = ({
           </svg>
         </div>
         <h3 className="text-lg font-medium text-gray-900 mb-2">No Gyms Found</h3>
-        <p className="text-gray-600">
-          No gyms were found in your selected radius. Try increasing the search radius.
-        </p>
+        {searchText ? (
+          <div className="text-gray-600">
+            <p>No gyms found matching <span className="font-medium">"{searchText}"</span> in your selected radius.</p>
+            <p className="mt-2">Try:</p>
+            <ul className="mt-1 text-sm text-gray-500">
+              <li>• Different search terms</li>
+              <li>• Increasing the search radius</li>
+              <li>• Clearing the search to see all gyms</li>
+            </ul>
+          </div>
+        ) : (
+          <p className="text-gray-600">
+            No gyms were found in your selected radius. Try increasing the search radius.
+          </p>
+        )}
       </div>
     );
   }
