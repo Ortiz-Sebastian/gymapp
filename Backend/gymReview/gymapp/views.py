@@ -181,6 +181,7 @@ class GymViewSet(viewsets.ModelViewSet):
         - latitude: latitude of search center
         - longitude: longitude of search center
         - radius: search radius in miles (default: 10)
+        - search_text: text to search for in gym names/addresses (optional)
         - max_cached_radius: maximum radius already searched and cached (optional)
         - cached_gyms: list of dicts with place_id and distance_miles from max radius search (optional)
         """
@@ -188,6 +189,7 @@ class GymViewSet(viewsets.ModelViewSet):
             latitude = float(request.data.get('latitude'))
             longitude = float(request.data.get('longitude'))
             radius_miles = float(request.data.get('radius', 10))  # Default 10 miles
+            search_text = request.data.get('search_text', '').strip()
             max_cached_radius = request.data.get('max_cached_radius')
             cached_gyms = request.data.get('cached_gyms', [])  # List of {place_id, distance_miles} from max radius
         except (TypeError, ValueError):
@@ -208,13 +210,86 @@ class GymViewSet(viewsets.ModelViewSet):
             if max_cached_radius:
                 try:
                     max_radius = float(max_cached_radius)
-                    # Only use cache if new radius is STRICTLY smaller (not equal)
-                    # This ensures we refresh data when selecting the same or larger radius
+                    # If new radius is less than or equal to max cached radius, use cache
                     if radius_miles <= max_radius:
                         use_cache = True
                         print(f"Using cache: searching {radius_miles} miles (max cached: {max_radius} miles)")
                 except (ValueError, TypeError):
                     pass
+
+            # If there's search text and we're not requesting a higher radius, try DB search first (faster than Places API)
+            if search_text and not (max_cached_radius and radius_miles > float(max_cached_radius)):
+                print(f"Searching DB for text: '{search_text}' within {radius_miles} miles")
+                
+                # Convert miles to meters for database query
+                db_radius_meters = radius_miles * 1609.34
+                point = Point(longitude, latitude, srid=4326)
+                
+                # Normalize search text for better matching
+                search_normalized = search_text.lower()
+                search_clean = search_normalized.replace("'", "").replace("-", " ").replace("_", " ")
+                search_terms = [term for term in search_clean.split() if term]
+                
+                # Build query: match if ANY term is found in name or address
+                query = Q(latitude__isnull=False, longitude__isnull=False)
+                if search_terms:
+                    text_query = Q()
+                    for term in search_terms:
+                        text_query |= Q(name__icontains=term) | Q(address__icontains=term)
+                    query &= text_query
+                
+                # Search gyms by text and radius
+                db_gyms = Gym.objects.filter(query).extra(
+                    where=['ST_DistanceSphere(ST_MakePoint(longitude, latitude), ST_MakePoint(%s, %s)) <= %s'],
+                    params=[longitude, latitude, db_radius_meters]
+                )
+                
+                # If we have cached gyms, filter to only include gyms that are in the cached place_ids
+                if cached_gyms:
+                    cached_place_ids = [gym['place_id'] for gym in cached_gyms]
+                    db_gyms = db_gyms.filter(place_id__in=cached_place_ids)
+                    print(f"Filtered DB search to only cached gyms: {cached_place_ids[:5]}...")  # Show first 5 for debugging
+                
+                if db_gyms.exists():
+                    print(f"Found {db_gyms.count()} gyms in DB matching '{search_text}'")
+                    
+                    # Serialize and add distance + relevance score
+                    serializer = self.get_serializer(db_gyms, many=True)
+                    gyms_data = serializer.data
+                    
+                    for gym_data in gyms_data:
+                        gym_obj = next((g for g in db_gyms if g.place_id == gym_data['place_id']), None)
+                        if gym_obj and gym_obj.latitude and gym_obj.longitude:
+                            distance = calculate_distance(
+                                latitude, longitude,
+                                float(gym_obj.latitude), float(gym_obj.longitude)
+                            )
+                            gym_data['distance_miles'] = round(distance, 2)
+                            
+                            # Calculate relevance score
+                            name_lower = gym_obj.name.lower().replace("'", "").replace("-", " ")
+                            if name_lower == search_clean or search_clean in name_lower:
+                                gym_data['relevance_score'] = 100
+                            elif any(term in name_lower for term in search_terms):
+                                gym_data['relevance_score'] = 50
+                            else:
+                                gym_data['relevance_score'] = 25
+                    
+                    # Sort by relevance score (highest first), then by distance
+                    gyms_data.sort(key=lambda x: (-x.get('relevance_score', 0), x.get('distance_miles', float('inf'))))
+                    
+                    return Response({
+                        'message': f'Found {len(gyms_data)} gyms matching "{search_text}" within {radius_miles} miles (from database)',
+                        'gyms': gyms_data
+                    }, status=status.HTTP_200_OK)
+                else:
+                    print(f"No gyms found in DB matching '{search_text}'")
+                    return Response({
+                        'message': f'No gyms found matching "{search_text}" within {radius_miles} miles',
+                        'gyms': []
+                    }, status=status.HTTP_200_OK)
+            
+
             
             if use_cache and cached_gyms:
                 # Filter cached gyms by distance already calculated from max radius
@@ -282,6 +357,11 @@ class GymViewSet(viewsets.ModelViewSet):
                         print(f"Error creating gym {place_id}: {str(e)}")
                         continue
             
+            # If there's search text, filter the results using the same logic as DB search
+            if search_text:
+                created_gyms = self._filter_gyms_by_search_text(created_gyms, search_text)
+                print(f"Filtered to {len(created_gyms)} gyms matching search text")
+            
             # Serialize and add distance from user location to each gym
             serializer = self.get_serializer(created_gyms, many=True)
             gyms_data = serializer.data
@@ -311,6 +391,32 @@ class GymViewSet(viewsets.ModelViewSet):
                 {'error': f'Error searching for gyms: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+    
+    def _filter_gyms_by_search_text(self, gyms, search_text):
+        """
+        Filter gyms by search text using the same logic as database queries.
+        This ensures consistent filtering whether we search DB or filter API results.
+        """
+        if not search_text:
+            return gyms
+            
+        # Normalize search text for filtering
+        search_normalized = search_text.lower()
+        search_clean = search_normalized.replace("'", "").replace("-", " ").replace("_", " ")
+        search_terms = [term for term in search_clean.split() if term]
+        
+        # Filter gyms that match the search text
+        filtered_gyms = []
+        for gym in gyms:
+            name_lower = gym.name.lower().replace("'", "").replace("-", " ")
+            address_lower = gym.address.lower() if gym.address else ""
+            
+            # Check if any search term matches name or address
+            matches = any(term in name_lower or term in address_lower for term in search_terms)
+            if matches:
+                filtered_gyms.append(gym)
+        
+        return filtered_gyms
 
 class ReviewViewSet(viewsets.ModelViewSet):
     queryset = Review.objects.all()

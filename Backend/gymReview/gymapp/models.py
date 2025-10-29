@@ -1,4 +1,4 @@
-from django.db import models
+from django.db import models, transaction
 from django.contrib.auth.models import AbstractUser
 from django.utils.translation import gettext_lazy as _
 from django.utils import timezone
@@ -73,6 +73,13 @@ class Gym(models.Model):
     opening_hours = models.JSONField(null=True, blank=True)  # Store opening hours
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    
+    # Data freshness tracking
+    last_places_api_sync = models.DateTimeField(null=True, blank=True)
+    data_source = models.CharField(max_length=20, default='places_api', 
+                                  choices=[('places_api', 'Google Places API'), 
+                                        ('user_generated', 'User Generated'),
+                                        ('manual', 'Manual Entry')])
 
     def __str__(self):
         return self.name
@@ -607,3 +614,70 @@ class GymClaim(models.Model):
     
     def __str__(self):
         return f"{self.claimant.username} claims {self.gym.name}"
+
+
+class TileCache(models.Model):
+    """Cache for Google Places API tile results"""
+    cache_key = models.CharField(max_length=100, unique=True, db_index=True)
+    latitude = models.DecimalField(max_digits=10, decimal_places=7)
+    longitude = models.DecimalField(max_digits=10, decimal_places=7)
+    tile_radius = models.IntegerField()
+    results_data = models.JSONField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    
+    class Meta:
+        db_table = 'gym_review_tile_cache'
+        indexes = [
+            models.Index(fields=['cache_key']),
+            models.Index(fields=['expires_at']),
+        ]
+    
+    def is_fresh(self):
+        """Check if cache entry is still valid"""
+        return timezone.now() < self.expires_at
+    
+    @classmethod
+    def create_key(cls, lat, lon, tile_r):
+        """Create cache key for tile coordinates and radius"""
+        return f"{round(float(lat), 5)}|{round(float(lon), 5)}|{tile_r}"
+    
+    @classmethod
+    def get_cached(cls, lat, lon, tile_r):
+        """Get cached results if available and fresh"""
+        key = cls.create_key(lat, lon, tile_r)
+        print(f"Cache lookup for key: {key}")
+        try:
+            cache_entry = cls.objects.get(cache_key=key)
+            print(f"Found cache entry, fresh: {cache_entry.is_fresh()}")
+            if cache_entry.is_fresh():
+                return cache_entry.results_data
+            else:
+                # Delete expired entry
+                print(f"Cache entry expired, deleting")
+                cache_entry.delete()
+                return None
+        except cls.DoesNotExist:
+            print(f"Cache entry not found")
+            return None
+    
+    @classmethod
+    def set_cached(cls, lat, lon, tile_r, results_data, ttl_days=7):
+        """Cache results with TTL"""
+        key = cls.create_key(lat, lon, tile_r)
+        expires_at = timezone.now() + timezone.timedelta(days=ttl_days)
+        print(f"Setting cache for key: {key} with {len(results_data)} results")
+        
+        # Update or create cache entry
+        cache_entry, created = cls.objects.update_or_create(
+            cache_key=key,
+            defaults={
+                'latitude': lat,
+                'longitude': lon,
+                'tile_radius': tile_r,
+                'results_data': results_data,
+                'expires_at': expires_at,
+            }
+        )
+        print(f"Cache {'created' if created else 'updated'}: {cache_entry.cache_key}")
+        return cache_entry
