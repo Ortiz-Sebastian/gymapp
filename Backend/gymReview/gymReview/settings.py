@@ -49,6 +49,10 @@ ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='localhost,127.0.0.1').split(','
 
 # API Keys
 GOOGLE_PLACES_API_KEY = config('GOOGLE_PLACES_API_KEY', default='')
+
+# Development mode - when True, uses database-only search (no Google API calls)
+# This helps avoid API charges during development
+USE_DB_ONLY_MODE = config('USE_DB_ONLY_MODE', default=False, cast=bool)
 AWS_ACCESS_KEY_ID = config('AWS_ACCESS_KEY_ID', default='')
 AWS_SECRET_ACCESS_KEY = config('AWS_SECRET_ACCESS_KEY', default='')
 AWS_REGION = config('AWS_REGION', default='us-east-1')
@@ -226,6 +230,8 @@ CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:3001",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
 ]
 
 CORS_ALLOW_CREDENTIALS = True

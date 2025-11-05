@@ -827,7 +827,8 @@ class GeocodingService:
     """
     
     def __init__(self):
-        self.google_api_key = os.getenv('GOOGLE_PLACES_API_KEY')
+        from django.conf import settings
+        self.google_api_key = getattr(settings, 'GOOGLE_PLACES_API_KEY', os.getenv('GOOGLE_PLACES_API_KEY', ''))
         self.openstreetmap_enabled = True  # Free service, no API key needed
         
     def geocode_address(self, address: str) -> Dict:
@@ -840,25 +841,42 @@ class GeocodingService:
         Returns:
             Dict with latitude, longitude, formatted_address, and confidence
         """
+        print(f"🔍 Geocoding address: '{address}'")
+        print(f"🔍 Google API Key: {'Available' if self.google_api_key else 'Not available'}")
+        
         # Try Google Geocoding first (most accurate)
         if self.google_api_key:
             try:
+                print("🔍 Trying Google Geocoding API...")
                 result = self._geocode_google(address)
                 if result:
+                    print(f"✅ Google geocoding successful: {result.get('formatted_address')}")
                     return result
+                else:
+                    print("⚠️  Google returned no results")
             except Exception as e:
+                print(f"❌ Google geocoding failed: {e}")
                 logger.warning(f"Google geocoding failed: {e}")
+        else:
+            print("⚠️  Skipping Google (no API key)")
         
         # Fallback to OpenStreetMap Nominatim (free)
         if self.openstreetmap_enabled:
             try:
+                print("🔍 Trying OpenStreetMap Nominatim API...")
                 result = self._geocode_openstreetmap(address)
                 if result:
+                    print(f"✅ OpenStreetMap geocoding successful: {result.get('formatted_address')}")
                     return result
+                else:
+                    print("⚠️  OpenStreetMap returned no results")
             except Exception as e:
+                print(f"❌ OpenStreetMap geocoding failed: {e}")
                 logger.warning(f"OpenStreetMap geocoding failed: {e}")
         
-        raise ValueError(f"Could not geocode address: {address}")
+        error_msg = f"Could not find location: '{address}'. Please try a more specific address (include city and state)."
+        print(f"❌ {error_msg}")
+        raise ValueError(error_msg)
     
     def geocode_zip_code(self, zip_code: str) -> Dict:
         """

@@ -59,7 +59,7 @@ class GymViewSet(viewsets.ModelViewSet):
         """
         Instantiates and returns the list of permissions that this view requires.
         """
-        if self.action in ['nearby', 'search_google_places']:
+        if self.action in ['nearby', 'search_google_places', 'geocode_location']:
             permission_classes = [permissions.AllowAny]
         else:
             permission_classes = [permissions.IsAuthenticatedOrReadOnly]
@@ -177,21 +177,18 @@ class GymViewSet(viewsets.ModelViewSet):
         """
         Search for gyms using Google Places API and save them to database.
         Smart caching: if searching smaller radius than max cached, filter cached data instead of calling API.
+        In development mode (USE_DB_ONLY_MODE=True), uses database-only search without calling Google API.
         Required parameters:
         - latitude: latitude of search center
         - longitude: longitude of search center
         - radius: search radius in miles (default: 10)
         - search_text: text to search for in gym names/addresses (optional)
-        - max_cached_radius: maximum radius already searched and cached (optional)
-        - cached_gyms: list of dicts with place_id and distance_miles from max radius search (optional)
         """
         try:
             latitude = float(request.data.get('latitude'))
             longitude = float(request.data.get('longitude'))
             radius_miles = float(request.data.get('radius', 10))  # Default 10 miles
             search_text = request.data.get('search_text', '').strip()
-            max_cached_radius = request.data.get('max_cached_radius')
-            cached_gyms = request.data.get('cached_gyms', [])  # List of {place_id, distance_miles} from max radius
         except (TypeError, ValueError):
             return Response(
                 {'error': 'Invalid latitude, longitude, or radius'},
@@ -201,24 +198,19 @@ class GymViewSet(viewsets.ModelViewSet):
         # Convert miles to meters (Google Places API uses meters)
         radius_meters = int(radius_miles * 1609.34)
         
+        # Check if we're in development mode (database-only, no API calls)
+        from django.conf import settings
+        use_db_only = getattr(settings, 'USE_DB_ONLY_MODE', False)
+        
+        if use_db_only:
+            print("🔧 DEV MODE: Using database-only search (no Google API calls)")
+            return self._search_database_only(latitude, longitude, radius_miles, search_text)
+        
         try:
             places_service = GooglePlacesService()
             
-            # Check if we can use cached data (searching smaller radius than max cached)
-            # We use cache only when narrowing the radius to avoid stale data
-            use_cache = False
-            if max_cached_radius:
-                try:
-                    max_radius = float(max_cached_radius)
-                    # If new radius is less than or equal to max cached radius, use cache
-                    if radius_miles <= max_radius:
-                        use_cache = True
-                        print(f"Using cache: searching {radius_miles} miles (max cached: {max_radius} miles)")
-                except (ValueError, TypeError):
-                    pass
-
-            # If there's search text and we're not requesting a higher radius, try DB search first (faster than Places API)
-            if search_text and not (max_cached_radius and radius_miles > float(max_cached_radius)):
+            # If there's search text, try DB search first (faster than Places API)
+            if search_text:
                 print(f"Searching DB for text: '{search_text}' within {radius_miles} miles")
                 
                 # Convert miles to meters for database query
@@ -243,12 +235,6 @@ class GymViewSet(viewsets.ModelViewSet):
                     where=['ST_DistanceSphere(ST_MakePoint(longitude, latitude), ST_MakePoint(%s, %s)) <= %s'],
                     params=[longitude, latitude, db_radius_meters]
                 )
-                
-                # If we have cached gyms, filter to only include gyms that are in the cached place_ids
-                if cached_gyms:
-                    cached_place_ids = [gym['place_id'] for gym in cached_gyms]
-                    db_gyms = db_gyms.filter(place_id__in=cached_place_ids)
-                    print(f"Filtered DB search to only cached gyms: {cached_place_ids[:5]}...")  # Show first 5 for debugging
                 
                 if db_gyms.exists():
                     print(f"Found {db_gyms.count()} gyms in DB matching '{search_text}'")
@@ -289,37 +275,7 @@ class GymViewSet(viewsets.ModelViewSet):
                         'gyms': []
                     }, status=status.HTTP_200_OK)
             
-
             
-            if use_cache and cached_gyms:
-                # Filter cached gyms by distance already calculated from max radius
-                # cached_gyms is a list of {place_id, distance_miles} dicts
-                valid_place_ids = [
-                    gym['place_id'] for gym in cached_gyms 
-                    if gym.get('distance_miles', float('inf')) <= radius_miles
-                ]
-                
-                # Get all gyms with those place_ids from database
-                gyms_from_db = Gym.objects.filter(place_id__in=valid_place_ids)
-                
-                # Serialize and add stored distance
-                filtered_gyms = []
-                distance_map = {gym['place_id']: gym.get('distance_miles', 0) for gym in cached_gyms}
-                
-                for gym in gyms_from_db:
-                    gym_data = self.get_serializer(gym).data
-                    gym_data['distance_miles'] = round(distance_map.get(gym.place_id, 0), 2)
-                    filtered_gyms.append(gym_data)
-                
-                # Sort by distance
-                filtered_gyms.sort(key=lambda x: x.get('distance_miles', float('inf')))
-                
-                print(f"Cache filter: Found {len(filtered_gyms)} gyms within {radius_miles} miles from {len(cached_gyms)} cached gyms")
-                
-                return Response({
-                    'message': f'Found {len(filtered_gyms)} gyms within {radius_miles} miles (from cache)',
-                    'gyms': filtered_gyms
-                }, status=status.HTTP_200_OK)
             
             # Otherwise, call the API
             print(f"Calling Google Places API with radius: {radius_miles} miles")
@@ -392,6 +348,87 @@ class GymViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
     
+    def _search_database_only(self, latitude, longitude, radius_miles, search_text=''):
+        """
+        Database-only search for development mode (no Google API calls).
+        Uses existing gyms in database within the specified radius.
+        """
+        print(f"🔧 Searching database for gyms within {radius_miles} miles")
+        
+        # Convert miles to meters for database query
+        radius_meters = radius_miles * 1609.34
+        
+        # Build query
+        query = Q(latitude__isnull=False, longitude__isnull=False)
+        
+        # Add text search if provided
+        if search_text:
+            search_normalized = search_text.lower()
+            search_clean = search_normalized.replace("'", "").replace("-", " ").replace("_", " ")
+            search_terms = [term for term in search_clean.split() if term]
+            
+            if search_terms:
+                text_query = Q()
+                for term in search_terms:
+                    text_query |= Q(name__icontains=term) | Q(address__icontains=term)
+                query &= text_query
+        
+        # Search gyms by radius (and text if provided)
+        db_gyms = Gym.objects.filter(query).extra(
+            where=['ST_DistanceSphere(ST_MakePoint(longitude, latitude), ST_MakePoint(%s, %s)) <= %s'],
+            params=[longitude, latitude, radius_meters]
+        )
+        
+        gym_count = db_gyms.count()
+        print(f"🔧 Found {gym_count} gyms in database")
+        
+        # Serialize and add distance + relevance score
+        serializer = self.get_serializer(db_gyms, many=True)
+        gyms_data = serializer.data
+        
+        for gym_data in gyms_data:
+            gym_obj = next((g for g in db_gyms if g.place_id == gym_data['place_id']), None)
+            if gym_obj and gym_obj.latitude and gym_obj.longitude:
+                distance = calculate_distance(
+                    latitude, longitude,
+                    float(gym_obj.latitude), float(gym_obj.longitude)
+                )
+                gym_data['distance_miles'] = round(distance, 2)
+                
+                # Calculate relevance score if search text provided
+                if search_text:
+                    name_lower = gym_obj.name.lower().replace("'", "").replace("-", " ")
+                    search_clean = search_text.lower().replace("'", "").replace("-", " ").replace("_", " ")
+                    search_terms = [term for term in search_clean.split() if term]
+                    
+                    if name_lower == search_clean or search_clean in name_lower:
+                        gym_data['relevance_score'] = 100
+                    elif any(term in name_lower for term in search_terms):
+                        gym_data['relevance_score'] = 50
+                    else:
+                        gym_data['relevance_score'] = 25
+        
+        # Sort by relevance (if search text) then by distance
+        if search_text:
+            gyms_data.sort(key=lambda x: (-x.get('relevance_score', 0), x.get('distance_miles', float('inf'))))
+        else:
+            gyms_data.sort(key=lambda x: x.get('distance_miles', float('inf')))
+        
+        message = f'🔧 DEV MODE: Found {gym_count} gyms'
+        if search_text:
+            message += f' matching "{search_text}"'
+        message += f' within {radius_miles} miles (from database only - no API calls)'
+        
+        return Response({
+            'message': message,
+            'gyms': gyms_data,
+            'dev_mode': True,
+            'summary': {
+                'total_gyms': gym_count,
+                'source': 'database_only'
+            }
+        }, status=status.HTTP_200_OK)
+    
     def _filter_gyms_by_search_text(self, gyms, search_text):
         """
         Filter gyms by search text using the same logic as database queries.
@@ -417,6 +454,57 @@ class GymViewSet(viewsets.ModelViewSet):
                 filtered_gyms.append(gym)
         
         return filtered_gyms
+    
+    @action(detail=False, methods=['post'])
+    def geocode_location(self, request):
+        """
+        Convert an address, zip code, or city/state to coordinates.
+        Required parameter:
+        - location: address string, zip code, or city/state
+        Returns:
+        - latitude, longitude, formatted_address
+        """
+        location = request.data.get('location', '').strip()
+        
+        if not location:
+            return Response(
+                {'error': 'Location is required', 'success': False},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        print(f"🔍 Geocoding request for: '{location}'")
+        
+        try:
+            geocoding_service = GeocodingService()
+            print(f"🔍 API Key available: {bool(geocoding_service.google_api_key)}")
+            
+            result = geocoding_service.geocode_address(location)
+            
+            print(f"✅ Geocoding successful: {result.get('formatted_address', location)}")
+            
+            return Response({
+                'success': True,
+                'latitude': result['latitude'],
+                'longitude': result['longitude'],
+                'formatted_address': result.get('formatted_address', location),
+                'location_type': result.get('confidence', 0.5),
+                'provider': result.get('provider', 'unknown')
+            }, status=status.HTTP_200_OK)
+            
+        except ValueError as e:
+            print(f"❌ Geocoding ValueError: {str(e)}")
+            return Response(
+                {'error': str(e), 'success': False},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            print(f"❌ Geocoding Exception: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return Response(
+                {'error': f'Geocoding failed: {str(e)}', 'success': False},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 class ReviewViewSet(viewsets.ModelViewSet):
     queryset = Review.objects.all()
