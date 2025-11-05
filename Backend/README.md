@@ -129,6 +129,31 @@ Visit `http://localhost:8000/api/docs/` for comprehensive API documentation.
 - `GET /api/comments/` - List user's comments
 - `POST /api/gyms/{id}/add_comment/` - Add comment to gym
 
+## Development Mode 🔧
+
+To avoid Google Places API charges during development, enable **Database-Only Mode**:
+
+```bash
+# Enable dev mode (database-only, no API calls)
+python3 toggle_dev_mode.py on
+
+# Disable dev mode (use Google Places API)
+python3 toggle_dev_mode.py off
+
+# Check current status
+python3 toggle_dev_mode.py
+```
+
+**Benefits:**
+- ✅ Zero API costs during development
+- ✅ Faster search responses (database-only)
+- ✅ Offline development capability
+- ✅ Same features and UI work identically
+
+**Note:** You need gyms in your database first. Do one API search with dev mode off to populate data, then enable dev mode for free development.
+
+See [DEV_MODE_SETUP.md](DEV_MODE_SETUP.md) for detailed instructions.
+
 ## Environment Variables
 
 Create a `.env` file in the Backend directory:
@@ -140,6 +165,9 @@ DATABASE_PASSWORD=your_postgres_password
 
 # Google Places API
 GOOGLE_PLACES_API_KEY=your_google_places_api_key
+
+# Development Mode (database-only search, no API calls)
+USE_DB_ONLY_MODE=True  # Set to False for production
 
 # Email (for production)
 EMAIL_HOST=your_smtp_host
