@@ -20,6 +20,8 @@ interface GymMapViewProps {
   loading: boolean;
   error: string | null;
   onGymClick?: (gym: Gym) => void;
+  selectedPlaceId?: string | null;
+  onSelectPlaceId?: (placeId: string | null) => void;
 }
 
 const GymMapView: React.FC<GymMapViewProps> = ({
@@ -28,6 +30,8 @@ const GymMapView: React.FC<GymMapViewProps> = ({
   loading,
   error,
   onGymClick,
+  selectedPlaceId,
+  onSelectPlaceId,
 }) => {
   const [mapElement, setMapElement] = useState<HTMLDivElement | null>(null);
   const [map, setMap] = useState<google.maps.Map | null>(null);
@@ -101,7 +105,15 @@ const GymMapView: React.FC<GymMapViewProps> = ({
         center: { lat: userLocation.latitude, lng: userLocation.longitude },
         zoom: 13,
         mapTypeId: google.maps.MapTypeId.ROADMAP,
-      });
+        // Enable natural scrolling/zooming and panning within the embedded map
+        gestureHandling: 'greedy', // allow scroll wheel to zoom without modifier
+        draggable: true,
+        scrollwheel: true,
+        zoomControl: true,
+        fullscreenControl: true,
+        streetViewControl: false,
+        mapTypeControl: false,
+      } as google.maps.MapOptions);
 
       setMap(mapInstance);
       console.log('GymMapView: Map initialized successfully');
@@ -165,8 +177,8 @@ const GymMapView: React.FC<GymMapViewProps> = ({
         title: gym.name,
         icon: {
           path: google.maps.SymbolPath.CIRCLE,
-          scale: 6,
-          fillColor: '#EF4444',
+          scale: selectedPlaceId === gym.place_id ? 9 : 6,
+          fillColor: selectedPlaceId === gym.place_id ? '#2563EB' : '#EF4444',
           fillOpacity: 1,
           strokeColor: '#FFFFFF',
           strokeWeight: 2,
@@ -175,6 +187,7 @@ const GymMapView: React.FC<GymMapViewProps> = ({
 
       // Add click listener
       marker.addListener('click', () => {
+        onSelectPlaceId?.(gym.place_id);
         onGymClick?.(gym);
       });
 
@@ -219,44 +232,11 @@ const GymMapView: React.FC<GymMapViewProps> = ({
     );
   }
 
-  if (error) {
-    return (
-      <div className="bg-red-50 border border-red-200 rounded-lg p-6 text-center">
-        <h3 className="text-lg font-medium text-red-800 mb-2">Error Loading Map</h3>
-        <p className="text-red-600">{error}</p>
-      </div>
-    );
-  }
-
-  if (mapError) {
-    return (
-      <div className="bg-red-50 border border-red-200 rounded-lg p-6 text-center">
-        <h3 className="text-lg font-medium text-red-800 mb-2">Map Error</h3>
-        <p className="text-red-600">{mapError}</p>
-      </div>
-    );
-  }
-
-  if (!isMapLoaded) {
-    return (
-      <div className="bg-white rounded-lg shadow-md p-8 text-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-        <p className="text-gray-600">Loading Google Maps...</p>
-      </div>
-    );
-  }
-
-  // Don't return early - always render the map div
-  
+  // Always render the map div so ref callback fires
   return (
-    <div className="bg-white rounded-lg shadow-md overflow-hidden">
-      <div className="p-4 border-b border-gray-200">
-        <h2 className="text-lg font-semibold text-gray-900">
-          Map View - {gyms.length} gym{gyms.length !== 1 ? 's' : ''} found
-        </h2>
-      </div>
-      
-      <div className="relative">
+    <div className="bg-transparent rounded-none shadow-none overflow-hidden h-full">
+      <div className="relative h-full">
+        {/* Map container - always rendered */}
         <div 
           ref={(el) => {
             console.log('GymMapView: Map div ref callback triggered, element:', !!el);
@@ -265,52 +245,32 @@ const GymMapView: React.FC<GymMapViewProps> = ({
               setMapElement(el);
             }
           }}
-          className="w-full h-96"
-          style={{ minHeight: '400px' }}
+          className="w-full h-full"
+          style={{ minHeight: 0 }}
         />
-        {!map && (
+        
+        {/* Loading overlay */}
+        {(loading || !isMapLoaded || !map) && !error && !mapError && (
           <div className="absolute inset-0 bg-white bg-opacity-90 flex items-center justify-center">
             <div className="text-center">
               <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-              <p className="text-gray-600">Initializing map...</p>
+              <p className="text-gray-600">
+                {!isMapLoaded ? 'Loading Google Maps...' : 'Initializing map...'}
+              </p>
+            </div>
+          </div>
+        )}
+        
+        {/* Error overlay */}
+        {(error || mapError) && (
+          <div className="absolute inset-0 bg-red-50 border border-red-200 flex items-center justify-center p-6">
+            <div className="text-center">
+              <h3 className="text-lg font-medium text-red-800 mb-2">Map Unavailable</h3>
+              <p className="text-red-600">{error || mapError}</p>
             </div>
           </div>
         )}
       </div>
-
-      {gyms.length > 0 && (
-        <div className="p-4 border-t border-gray-200">
-          <h3 className="text-md font-medium text-gray-900 mb-3">Gyms in this area:</h3>
-          <div className="space-y-2 max-h-40 overflow-y-auto">
-            {gyms.slice(0, 5).map((gym) => (
-              <div
-                key={gym.place_id}
-                className="flex items-center justify-between p-2 bg-gray-50 rounded cursor-pointer hover:bg-gray-100"
-                onClick={() => onGymClick?.(gym)}
-              >
-                <div className="flex-1">
-                  <h4 className="font-medium text-gray-900">{gym.name}</h4>
-                  <p className="text-sm text-gray-600">{gym.address}</p>
-                  {gym.distance_miles && (
-                    <p className="text-xs text-gray-500">{gym.distance_miles.toFixed(1)} miles away</p>
-                  )}
-                </div>
-                {gym.google_rating && (
-                  <div className="flex items-center text-sm text-gray-600">
-                    <span className="text-yellow-400">★</span>
-                    <span className="ml-1">{gym.google_rating}</span>
-                  </div>
-                )}
-              </div>
-            ))}
-            {gyms.length > 5 && (
-              <p className="text-sm text-gray-500 text-center">
-                And {gyms.length - 5} more gyms...
-              </p>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   );
 };
