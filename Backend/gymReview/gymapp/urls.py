@@ -5,7 +5,7 @@ from . import views
 from .auth_views import (
     CustomTokenObtainPairView, RegisterView, LogoutView,
     PasswordResetRequestView, PasswordResetConfirmView, 
-    ChangePasswordView, user_profile, update_profile
+    ChangePasswordView, user_profile, update_profile, update_user_preferences
 )
 from .api_docs import api_documentation
 
@@ -43,6 +43,7 @@ urlpatterns = [
     # User profile
     path('auth/profile/', user_profile, name='user_profile'),
     path('auth/profile/update/', update_profile, name='update_profile'),
+    path('auth/update-preferences/', update_user_preferences, name='update_preferences'),
     
     # API Documentation
     path('docs/', api_documentation, name='api_docs'),

@@ -11,6 +11,7 @@ interface Gym {
   google_rating?: number;
   google_user_ratings_total?: number;
   average_overall_rating: number;
+  review_count: number;
   distance_miles?: number;
 }
 
@@ -21,7 +22,6 @@ interface GymMapViewProps {
   error: string | null;
   onGymClick?: (gym: Gym) => void;
   selectedPlaceId?: string | null;
-  onSelectPlaceId?: (placeId: string | null) => void;
 }
 
 const GymMapView: React.FC<GymMapViewProps> = ({
@@ -31,7 +31,6 @@ const GymMapView: React.FC<GymMapViewProps> = ({
   error,
   onGymClick,
   selectedPlaceId,
-  onSelectPlaceId,
 }) => {
   const [mapElement, setMapElement] = useState<HTMLDivElement | null>(null);
   const [map, setMap] = useState<google.maps.Map | null>(null);
@@ -144,19 +143,47 @@ const GymMapView: React.FC<GymMapViewProps> = ({
     return () => userMarker.setMap(null);
   }, [map, userLocation]);
 
-  // Add gym markers
+  // Store gym -> marker mapping
+  const gymMarkersRef = useRef<Map<string, google.maps.Marker>>(new Map());
+  const hasFitBoundsRef = useRef(false);
+
+  // Store gyms in ref to avoid recreating markers on selection changes
+  const gymsRef = useRef<Gym[]>([]);
+  const [isCreatingMarkers, setIsCreatingMarkers] = useState(false);
+  
+  // Add gym markers (only when gyms actually change, not on selection)
   useEffect(() => {
     console.log('GymMapView: Gym markers effect triggered');
     console.log('GymMapView: map:', !!map);
     console.log('GymMapView: gyms.length:', gyms.length);
-    console.log('GymMapView: markersRef.current.length:', markersRef.current.length);
     
     if (!map || !gyms.length) {
       console.log('GymMapView: Skipping marker update - no map or no gyms');
+      // Clear markers if no gyms
+      if (markersRef.current.length > 0) {
+        markersRef.current.forEach(marker => {
+          marker.setMap(null);
+          google.maps.event.clearInstanceListeners(marker);
+        });
+        markersRef.current = [];
+        gymMarkersRef.current.clear();
+        hasFitBoundsRef.current = false;
+      }
+      gymsRef.current = [];
       return;
     }
 
-    console.log('GymMapView: Updating markers with', gyms.length, 'gyms');
+    // Check if gyms actually changed (by checking place_ids)
+    const currentPlaceIds = gyms.map(g => g.place_id).sort().join(',');
+    const previousPlaceIds = gymsRef.current.map(g => g.place_id).sort().join(',');
+    
+    if (currentPlaceIds === previousPlaceIds) {
+      console.log('GymMapView: Gyms unchanged, skipping marker recreation');
+      return;
+    }
+
+    console.log('GymMapView: Gyms changed, updating markers');
+    gymsRef.current = gyms;
     
     // Clear existing markers first
     if (markersRef.current.length > 0) {
@@ -166,62 +193,100 @@ const GymMapView: React.FC<GymMapViewProps> = ({
         google.maps.event.clearInstanceListeners(marker);
       });
       markersRef.current = [];
+      gymMarkersRef.current.clear();
     }
 
-    // Create new markers
-    console.log('GymMapView: Creating new markers');
-    const newMarkers = gyms.map((gym) => {
-      const marker = new google.maps.Marker({
-        position: { lat: gym.latitude, lng: gym.longitude },
-        map: map,
-        title: gym.name,
-        icon: {
-          path: google.maps.SymbolPath.CIRCLE,
-          scale: selectedPlaceId === gym.place_id ? 9 : 6,
-          fillColor: selectedPlaceId === gym.place_id ? '#2563EB' : '#EF4444',
-          fillOpacity: 1,
-          strokeColor: '#FFFFFF',
-          strokeWeight: 2,
-        },
-      });
-
-      // Add click listener
-      marker.addListener('click', () => {
-        onSelectPlaceId?.(gym.place_id);
-        onGymClick?.(gym);
-      });
-
-      return marker;
-    });
-
-    markersRef.current = newMarkers;
-    console.log('GymMapView: Created', newMarkers.length, 'markers');
-
-    // Fit bounds to show all markers (only if we're not in the middle of updates)
-    if (newMarkers.length > 0) {
-      try {
-        const bounds = new google.maps.LatLngBounds();
-        newMarkers.forEach(marker => {
-          const pos = marker.getPosition();
-          if (pos) bounds.extend(pos);
-        });
-        bounds.extend(new google.maps.LatLng(userLocation.latitude, userLocation.longitude));
+    // Create markers in batches to avoid blocking the UI
+    const createMarkersAsync = async () => {
+      setIsCreatingMarkers(true);
+      console.log('GymMapView: Creating new markers asynchronously');
+      const newMarkers: google.maps.Marker[] = [];
+      const BATCH_SIZE = 50; // Create 50 markers at a time
+      
+      for (let i = 0; i < gyms.length; i += BATCH_SIZE) {
+        const batch = gyms.slice(i, i + BATCH_SIZE);
         
-        // Only fit bounds if we have valid positions
-        map.fitBounds(bounds);
-        console.log('GymMapView: Fitted bounds to show all markers');
-      } catch (error) {
-        console.error('GymMapView: Error fitting bounds:', error);
-        // Fallback: just center on user location if bounds fitting fails
-        try {
-          const center = new google.maps.LatLng(userLocation.latitude, userLocation.longitude);
-          map.setCenter(center);
-        } catch (err) {
-          console.error('GymMapView: Error setting center:', err);
+        // Create a batch of markers
+        const batchMarkers = batch.map((gym) => {
+          const marker = new google.maps.Marker({
+            position: { lat: gym.latitude, lng: gym.longitude },
+            map: map,
+            title: gym.name,
+            icon: {
+              path: google.maps.SymbolPath.CIRCLE,
+              scale: 6,
+              fillColor: '#EF4444',
+              fillOpacity: 1,
+              strokeColor: '#FFFFFF',
+              strokeWeight: 2,
+            },
+          });
+
+          // Add click listener
+          marker.addListener('click', () => {
+            onGymClick?.(gym);
+          });
+
+          gymMarkersRef.current.set(gym.place_id, marker);
+          return marker;
+        });
+        
+        newMarkers.push(...batchMarkers);
+        
+        // Yield to the browser to keep UI responsive
+        if (i + BATCH_SIZE < gyms.length) {
+          await new Promise(resolve => setTimeout(resolve, 0));
         }
       }
-    }
+
+      markersRef.current = newMarkers;
+      console.log('GymMapView: Created', newMarkers.length, 'markers');
+
+      // Only fit bounds on initial load
+      if (newMarkers.length > 0 && !hasFitBoundsRef.current) {
+        try {
+          const bounds = new google.maps.LatLngBounds();
+          newMarkers.forEach(marker => {
+            const pos = marker.getPosition();
+            if (pos) bounds.extend(pos);
+          });
+          bounds.extend(new google.maps.LatLng(userLocation.latitude, userLocation.longitude));
+          
+          map.fitBounds(bounds);
+          hasFitBoundsRef.current = true;
+          console.log('GymMapView: Fitted bounds to show all markers');
+        } catch (error) {
+          console.error('GymMapView: Error fitting bounds:', error);
+        }
+      }
+      
+      setIsCreatingMarkers(false);
+    };
+    
+    createMarkersAsync();
   }, [map, gyms, userLocation, onGymClick]);
+
+  // Update marker appearance when selection changes (without recreating markers)
+  useEffect(() => {
+    if (!map || gymMarkersRef.current.size === 0) return;
+
+    console.log('GymMapView: Updating marker selection for:', selectedPlaceId);
+    
+    // Update all markers
+    gymMarkersRef.current.forEach((marker, placeId) => {
+      const isSelected = placeId === selectedPlaceId;
+      const iconConfig: google.maps.Symbol = {
+        path: google.maps.SymbolPath.CIRCLE,
+        scale: isSelected ? 9 : 6,
+        fillColor: isSelected ? '#2563EB' : '#EF4444',
+        fillOpacity: 1,
+        strokeColor: '#FFFFFF',
+        strokeWeight: 2,
+      };
+      // Use type assertion to call setIcon on the marker
+      (marker as any).setIcon(iconConfig);
+    });
+  }, [selectedPlaceId, map]);
 
   if (loading) {
     return (
@@ -258,6 +323,14 @@ const GymMapView: React.FC<GymMapViewProps> = ({
                 {!isMapLoaded ? 'Loading Google Maps...' : 'Initializing map...'}
               </p>
             </div>
+          </div>
+        )}
+        
+        {/* Marker creation indicator */}
+        {isCreatingMarkers && (
+          <div className="absolute bottom-4 right-4 bg-white rounded-lg shadow-lg px-4 py-2 flex items-center space-x-2">
+            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
+            <p className="text-sm text-gray-700">Loading markers...</p>
           </div>
         )}
         

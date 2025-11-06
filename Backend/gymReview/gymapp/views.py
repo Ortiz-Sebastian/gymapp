@@ -55,15 +55,105 @@ class GymViewSet(viewsets.ModelViewSet):
     serializer_class = GymSerializer
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]
     
+    def get_serializer_class(self):
+        """
+        Use detailed serializer for single gym retrieval
+        """
+        # When filtering by place_id, use detail serializer (includes amenities)
+        if self.request.query_params.get('place_id'):
+            from .serializers import GymDetailSerializer
+            return GymDetailSerializer
+        return GymSerializer
+    
+    def get_queryset(self):
+        """
+        Filter gyms by query parameters
+        """
+        queryset = Gym.objects.all()
+        
+        # Filter by place_id if provided
+        place_id = self.request.query_params.get('place_id', None)
+        if place_id:
+            queryset = queryset.filter(place_id=place_id)
+        
+        return queryset
+    
     def get_permissions(self):
         """
         Instantiates and returns the list of permissions that this view requires.
         """
-        if self.action in ['nearby', 'search_google_places', 'geocode_location']:
+        if self.action in ['nearby', 'search_google_places', 'geocode_location', 'proxy_photo']:
             permission_classes = [permissions.AllowAny]
         else:
             permission_classes = [permissions.IsAuthenticatedOrReadOnly]
         return [permission() for permission in permission_classes]
+    
+    @action(detail=False, methods=['get'])
+    def proxy_photo(self, request):
+        """
+        Proxy Google Places Photo API requests to avoid CORS issues.
+        Required query parameter:
+        - photo_reference: Google Places photo reference string
+        Optional query parameters:
+        - maxwidth: Maximum width of the photo (default: 800)
+        - maxheight: Maximum height of the photo
+        """
+        import requests
+        from django.conf import settings
+        
+        photo_reference = request.query_params.get('photo_reference')
+        if not photo_reference:
+            return Response(
+                {'error': 'photo_reference is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        maxwidth = request.query_params.get('maxwidth', '800')
+        maxheight = request.query_params.get('maxheight', '')
+        
+        # Get Google API key from settings
+        api_key = getattr(settings, 'GOOGLE_PLACES_API_KEY', '')
+        if not api_key:
+            return Response(
+                {'error': 'Google Places API key not configured'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        
+        # Build Google Places Photo API URL
+        params = {
+            'photo_reference': photo_reference,
+            'key': api_key
+        }
+        if maxwidth:
+            params['maxwidth'] = maxwidth
+        if maxheight:
+            params['maxheight'] = maxheight
+        
+        photo_url = 'https://maps.googleapis.com/maps/api/place/photo'
+        
+        try:
+            # Make request to Google API
+            response = requests.get(photo_url, params=params, stream=True, timeout=10)
+            
+            if response.status_code == 200:
+                # Return the image with proper content type
+                django_response = HttpResponse(
+                    response.content,
+                    content_type=response.headers.get('Content-Type', 'image/jpeg')
+                )
+                # Add cache headers
+                django_response['Cache-Control'] = 'public, max-age=86400'  # Cache for 1 day
+                return django_response
+            else:
+                return Response(
+                    {'error': f'Failed to fetch photo from Google: {response.status_code}'},
+                    status=response.status_code
+                )
+        except requests.RequestException as e:
+            return Response(
+                {'error': f'Error fetching photo: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     @action(detail=False, methods=['get'])
     def nearby(self, request):
@@ -184,12 +274,20 @@ class GymViewSet(viewsets.ModelViewSet):
         - radius: search radius in miles (default: 10)
         - search_text: text to search for in gym names/addresses (optional)
         """
+        import traceback
+        print("=" * 80)
+        print("🔍 search_google_places called")
+        print("=" * 80)
+        
         try:
             latitude = float(request.data.get('latitude'))
             longitude = float(request.data.get('longitude'))
             radius_miles = float(request.data.get('radius', 10))  # Default 10 miles
             search_text = request.data.get('search_text', '').strip()
-        except (TypeError, ValueError):
+            print(f"✅ Parameters parsed: lat={latitude}, lng={longitude}, radius={radius_miles}")
+        except (TypeError, ValueError) as e:
+            print(f"❌ Parameter parsing error: {e}")
+            traceback.print_exc()
             return Response(
                 {'error': 'Invalid latitude, longitude, or radius'},
                 status=status.HTTP_400_BAD_REQUEST
@@ -343,6 +441,11 @@ class GymViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_200_OK)
             
         except Exception as e:
+            print("=" * 80)
+            print(f"❌❌❌ EXCEPTION in search_google_places: {str(e)}")
+            print("=" * 80)
+            traceback.print_exc()
+            print("=" * 80)
             return Response(
                 {'error': f'Error searching for gyms: {str(e)}'},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -512,10 +615,18 @@ class ReviewViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]  # Require auth to create, allow viewing
 
     def get_queryset(self):
-        # For authenticated users, show their own reviews
+        queryset = Review.objects.all()
+        
+        # Filter by gym if provided (for gym detail page - shows all reviews for that gym)
+        gym_place_id = self.request.query_params.get('gym', None)
+        if gym_place_id:
+            return queryset.filter(gym__place_id=gym_place_id)
+        
+        # If no gym filter but user is authenticated, return their own reviews (for "my reviews" page)
         if self.request.user.is_authenticated:
-            return Review.objects.filter(user=self.request.user)
-        # For anonymous users, return empty queryset (they can only view public reviews)
+            return queryset.filter(user=self.request.user)
+        
+        # For anonymous users with no gym filter, return empty queryset
         return Review.objects.none()
 
     def perform_create(self, serializer):

@@ -25,4 +25,11 @@ ENV/
 
 # OS
 .DS_Store
-Thumbs.db 
+Thumbs.db
+
+# ML Models (auto-downloaded at runtime)
+*.pt
+*.weights
+*.cfg
+ml_models/
+classifier_model* 

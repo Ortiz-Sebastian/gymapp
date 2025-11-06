@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 interface Gym {
   place_id: string;
@@ -11,6 +12,7 @@ interface Gym {
   google_rating?: number;
   google_user_ratings_total?: number;
   average_overall_rating: number;
+  review_count: number;
   distance_miles?: number;
 }
 
@@ -22,6 +24,7 @@ interface GymListViewProps {
   searchText?: string;
   selectedPlaceId?: string | null;
   totalCount: number;
+  scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
 }
 
 const GymListView: React.FC<GymListViewProps> = ({
@@ -32,7 +35,99 @@ const GymListView: React.FC<GymListViewProps> = ({
   searchText,
   selectedPlaceId,
   totalCount,
+  scrollContainerRef,
 }) => {
+  const navigate = useNavigate();
+  const selectedGymRef = useRef<HTMLDivElement>(null);
+  const [hoveredGymId, setHoveredGymId] = useState<string | null>(null);
+
+  // Memoize renderStars function to avoid recreating on every render
+  // MUST be defined before any early returns to comply with Rules of Hooks
+  const renderStars = useMemo(() => {
+    return (rating: number) => {
+      const fullStars = Math.floor(rating);
+      const hasHalfStar = rating % 1 !== 0;
+      const emptyStars = 5 - fullStars - (hasHalfStar ? 1 : 0);
+
+      return (
+        <div className="flex items-center">
+          {[...Array(fullStars)].map((_, i) => (
+            <svg
+              key={i}
+              className="h-3.5 w-3.5 text-yellow-400"
+              fill="currentColor"
+              viewBox="0 0 20 20"
+            >
+              <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+            </svg>
+          ))}
+          {hasHalfStar && (
+            <svg
+              className="h-3.5 w-3.5 text-yellow-400"
+              fill="currentColor"
+              viewBox="0 0 20 20"
+            >
+              <defs>
+                <linearGradient id="half-star">
+                  <stop offset="50%" stopColor="currentColor" />
+                  <stop offset="50%" stopColor="transparent" />
+                </linearGradient>
+              </defs>
+              <path
+                fill="url(#half-star)"
+                d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"
+              />
+            </svg>
+          )}
+          {[...Array(emptyStars)].map((_, i) => (
+            <svg
+              key={i + fullStars + (hasHalfStar ? 1 : 0)}
+              className="h-3.5 w-3.5 text-gray-300"
+              fill="currentColor"
+              viewBox="0 0 20 20"
+            >
+              <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+            </svg>
+          ))}
+          <span className="ml-1 text-xs text-gray-600">
+            {rating.toFixed(1)}
+          </span>
+        </div>
+      );
+    };
+  }, []);
+
+  // Scroll selected gym into view when selection changes or gyms update
+  useEffect(() => {
+    if (!selectedPlaceId || !scrollContainerRef?.current) return;
+    
+    // Check if the selected gym is in the current page
+    const isGymInCurrentPage = gyms.some(g => g.place_id === selectedPlaceId);
+    
+    if (isGymInCurrentPage && selectedGymRef.current) {
+      // Wait for DOM to update and then scroll
+      setTimeout(() => {
+        const selectedElement = selectedGymRef.current;
+        const container = scrollContainerRef.current;
+        
+        if (selectedElement && container) {
+          // Calculate the position to scroll to (center the element)
+          const containerRect = container.getBoundingClientRect();
+          const elementRect = selectedElement.getBoundingClientRect();
+          const scrollTop = container.scrollTop;
+          
+          const elementTop = elementRect.top - containerRect.top + scrollTop;
+          const targetScroll = elementTop - (containerRect.height / 2) + (elementRect.height / 2);
+          
+          container.scrollTo({
+            top: targetScroll,
+            behavior: 'smooth',
+          });
+        }
+      }, 150); // Slightly longer delay to ensure page change has fully rendered
+    }
+  }, [selectedPlaceId, gyms, scrollContainerRef]);
+
   if (loading) {
     return (
       <div className="space-y-3">
@@ -110,58 +205,6 @@ const GymListView: React.FC<GymListViewProps> = ({
     );
   }
 
-  const renderStars = (rating: number) => {
-    const fullStars = Math.floor(rating);
-    const hasHalfStar = rating % 1 !== 0;
-    const emptyStars = 5 - fullStars - (hasHalfStar ? 1 : 0);
-
-    return (
-      <div className="flex items-center">
-        {[...Array(fullStars)].map((_, i) => (
-          <svg
-            key={i}
-            className="h-3.5 w-3.5 text-yellow-400"
-            fill="currentColor"
-            viewBox="0 0 20 20"
-          >
-            <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
-          </svg>
-        ))}
-        {hasHalfStar && (
-          <svg
-            className="h-3.5 w-3.5 text-yellow-400"
-            fill="currentColor"
-            viewBox="0 0 20 20"
-          >
-            <defs>
-              <linearGradient id="half-star">
-                <stop offset="50%" stopColor="currentColor" />
-                <stop offset="50%" stopColor="transparent" />
-              </linearGradient>
-            </defs>
-            <path
-              fill="url(#half-star)"
-              d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z"
-            />
-          </svg>
-        )}
-        {[...Array(emptyStars)].map((_, i) => (
-          <svg
-            key={i + fullStars + (hasHalfStar ? 1 : 0)}
-            className="h-3.5 w-3.5 text-gray-300"
-            fill="currentColor"
-            viewBox="0 0 20 20"
-          >
-            <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
-          </svg>
-        ))}
-        <span className="ml-1 text-xs text-gray-600">
-          {rating.toFixed(1)}
-        </span>
-      </div>
-    );
-  };
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '2rem' }}>
       <div className="flex justify-between items-center">
@@ -170,32 +213,33 @@ const GymListView: React.FC<GymListViewProps> = ({
         </h2>
       </div>
 
-      {gyms.map((gym) => (
-        <div
-          key={gym.place_id}
-          className={`bg-white rounded-xl transition-all duration-300 cursor-pointer border transform hover:-translate-y-1 ${
-            selectedPlaceId === gym.place_id ? 'border-blue-500 ring-2 ring-blue-300' : 'border-gray-200'
-          }`}
-          style={{
-            boxShadow: selectedPlaceId === gym.place_id 
-              ? '0 10px 30px rgba(59, 130, 246, 0.3), 0 4px 10px rgba(0, 0, 0, 0.1)'
-              : '0 8px 20px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.08)'
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.boxShadow = '0 20px 40px rgba(0, 0, 0, 0.2), 0 8px 16px rgba(0, 0, 0, 0.12)';
-          }}
-          onMouseLeave={(e) => {
-            if (selectedPlaceId === gym.place_id) {
-              e.currentTarget.style.boxShadow = '0 10px 30px rgba(59, 130, 246, 0.3), 0 4px 10px rgba(0, 0, 0, 0.1)';
-            } else {
-              e.currentTarget.style.boxShadow = '0 8px 20px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.08)';
-            }
-          }}
-          onClick={() => onGymClick?.(gym)}
-        >
+      {gyms.map((gym) => {
+        const isSelected = selectedPlaceId === gym.place_id;
+        const isHovered = hoveredGymId === gym.place_id;
+        
+        return (
+          <div
+            key={gym.place_id}
+            ref={isSelected ? selectedGymRef : null}
+            className={`bg-white rounded-xl transition-all duration-200 cursor-pointer border transform ${
+              isSelected 
+                ? 'border-blue-500 ring-2 ring-blue-300 shadow-blue' 
+                : 'border-gray-200 shadow-default'
+            } ${isHovered && !isSelected ? 'shadow-hover -translate-y-1' : ''}`}
+            onMouseEnter={() => setHoveredGymId(gym.place_id)}
+            onMouseLeave={() => setHoveredGymId(null)}
+            onClick={() => onGymClick?.(gym)}
+          >
           <div className="p-5">
             <div className="flex justify-between items-start mb-1.5">
-              <h3 className="text-base font-semibold text-gray-900 hover:text-blue-600">
+              <h3 
+                className="text-base font-semibold text-gray-900 hover:text-blue-600 cursor-pointer"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  console.log('Navigating to gym:', gym.name, 'with place_id:', gym.place_id);
+                  navigate(`/gym/${gym.place_id}`);
+                }}
+              >
                 {gym.name}
               </h3>
               {gym.distance_miles && (
@@ -209,21 +253,15 @@ const GymListView: React.FC<GymListViewProps> = ({
 
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center space-x-3">
-                {gym.average_overall_rating > 0 && (
+                {gym.average_overall_rating > 0 ? (
                   <div className="flex items-center">
                     {renderStars(gym.average_overall_rating)}
                     <span className="ml-1 text-[10px] text-gray-500">
-                      (app rating)
+                      ({gym.review_count} {gym.review_count === 1 ? 'review' : 'reviews'})
                     </span>
                   </div>
-                )}
-                {gym.google_rating && (
-                  <div className="flex items-center">
-                    {renderStars(gym.google_rating)}
-                    <span className="ml-1 text-[10px] text-gray-500">
-                      ({gym.google_user_ratings_total} Google reviews)
-                    </span>
-                  </div>
+                ) : (
+                  <span className="text-xs text-gray-400 italic">No reviews yet</span>
                 )}
               </div>
             </div>
@@ -254,7 +292,8 @@ const GymListView: React.FC<GymListViewProps> = ({
             </div>
           </div>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 };

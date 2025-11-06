@@ -46,6 +46,7 @@ class UserSerializer(serializers.ModelSerializer):
 
 class ReviewSerializer(serializers.ModelSerializer):
     user = serializers.SerializerMethodField()
+    gym_detail = serializers.SerializerMethodField()
     overall_rating = serializers.ReadOnlyField()
     helpful_votes = serializers.ReadOnlyField()
     not_helpful_votes = serializers.ReadOnlyField()
@@ -53,18 +54,28 @@ class ReviewSerializer(serializers.ModelSerializer):
     class Meta:
         model = Review
         fields = [
-            'id', 'user', 'gym',
+            'id', 'user', 'gym', 'gym_detail',
             'equipment_rating', 'cleanliness_rating',
             'staff_rating', 'value_rating', 'atmosphere_rating', 'programs_classes_rating',
             'overall_rating', 'review_text', 'review_photo', 'would_recommend',
-            'helpful_votes', 'not_helpful_votes',
+            'is_anonymous', 'helpful_votes', 'not_helpful_votes',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['user', 'created_at', 'updated_at', 'helpful_votes', 'not_helpful_votes']
+        read_only_fields = ['user', 'gym_detail', 'created_at', 'updated_at', 'helpful_votes', 'not_helpful_votes']
     
     def get_user(self, obj):
-        """Return display name based on user's anonymous settings"""
-        return obj.user.review_display_name
+        """Return display name - show as Anonymous if is_anonymous is True"""
+        if obj.is_anonymous:
+            return {'username': 'Anonymous'}
+        return {'username': obj.user.username}
+    
+    def get_gym_detail(self, obj):
+        """Return gym information"""
+        return {
+            'place_id': obj.gym.place_id,
+            'name': obj.gym.name,
+            'address': obj.gym.address
+        }
 
 # CommentSerializer removed - reviews now include text directly
 
@@ -124,10 +135,7 @@ class GymAmenitySerializer(serializers.ModelSerializer):
 
 
 class GymSerializer(serializers.ModelSerializer):
-    reviews = ReviewSerializer(many=True, read_only=True)
-    photos = GymPhotoSerializer(many=True, read_only=True)
-    amenities = GymAmenitySerializer(source='gym_amenities', many=True, read_only=True)
-    
+    """Lightweight serializer for list views - no nested objects"""
     # Average ratings for each category
     average_equipment_rating = serializers.SerializerMethodField()
     average_cleanliness_rating = serializers.SerializerMethodField()
@@ -136,20 +144,22 @@ class GymSerializer(serializers.ModelSerializer):
     average_atmosphere_rating = serializers.SerializerMethodField()
     average_programs_classes_rating = serializers.SerializerMethodField()
     average_overall_rating = serializers.SerializerMethodField()
+    review_count = serializers.SerializerMethodField()
     
     class Meta:
         model = Gym
         fields = [
             'place_id', 'name', 'address', 'description', 
             'latitude', 'longitude', 'phone_number', 'website',
-            'google_rating', 'google_user_ratings_total', 'photo_reference',
+            'google_rating', 'google_user_ratings_total', 'photo_reference', 'photo_references',
             'types', 'opening_hours', 'created_at', 'updated_at',
-            'reviews', 'photos', 'amenities',
+            # Removed 'amenities', 'reviews', and 'photos' for performance - fetch separately when needed
             'average_equipment_rating', 'average_cleanliness_rating',
             'average_staff_rating', 'average_value_rating',
-            'average_atmosphere_rating', 'average_programs_classes_rating', 'average_overall_rating'
+            'average_atmosphere_rating', 'average_programs_classes_rating', 'average_overall_rating',
+            'review_count'
         ]
-        read_only_fields = ['created_at', 'updated_at']
+        read_only_fields = ['place_id', 'created_at', 'updated_at']
     
     def get_average_equipment_rating(self, obj):
         return obj.avg_equipment_rating
@@ -171,6 +181,26 @@ class GymSerializer(serializers.ModelSerializer):
     
     def get_average_overall_rating(self, obj):
         return obj.overall_avg_rating
+    
+    def get_review_count(self, obj):
+        return obj.reviews.count()
+
+
+class GymDetailSerializer(GymSerializer):
+    """Detailed serializer for single gym view - includes nested amenities"""
+    amenities = GymAmenitySerializer(source='gym_amenities', many=True, read_only=True)
+    
+    class Meta(GymSerializer.Meta):
+        fields = [
+            'place_id', 'name', 'address', 'description', 
+            'latitude', 'longitude', 'phone_number', 'website',
+            'google_rating', 'google_user_ratings_total', 'photo_reference', 'photo_references',
+            'types', 'opening_hours', 'created_at', 'updated_at',
+            'amenities',  # Include amenities for detail view
+            'average_equipment_rating', 'average_cleanliness_rating',
+            'average_staff_rating', 'average_value_rating',
+            'average_atmosphere_rating', 'average_programs_classes_rating', 'average_overall_rating'
+        ]
 
 
 class ReviewVoteSerializer(serializers.ModelSerializer):

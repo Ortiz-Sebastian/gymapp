@@ -795,9 +795,10 @@ class GooglePlacesService:
         latitude = location.get('lat')
         longitude = location.get('lng')
         
-        # Extract photos
+        # Extract photos - store all photo references
         photos = details.get('photos', [])
-        photo_reference = photos[0].get('photo_reference') if photos else ''
+        photo_reference = photos[0].get('photo_reference') if photos else ''  # Legacy: first photo
+        photo_references = [photo.get('photo_reference') for photo in photos if photo.get('photo_reference')]
         
         # Create or update gym
         gym, created = Gym.objects.get_or_create(
@@ -812,6 +813,7 @@ class GooglePlacesService:
                 'google_rating': details.get('rating'),
                 'google_user_ratings_total': details.get('user_ratings_total'),
                 'photo_reference': photo_reference,
+                'photo_references': photo_references,  # Store all photo references
                 'types': details.get('types', []),
                 'opening_hours': details.get('opening_hours', {}),
             }
@@ -1183,6 +1185,10 @@ class ImageModerationService:
         self.auto_approve_threshold = 0.8  # Auto-approve if confidence > 0.8
         self.auto_reject_threshold = 0.3   # Auto-reject if confidence < 0.3
         
+        # Initialize AI detectors (lazy loading)
+        self._nudenet_detector = None
+        self._yolo_detector = None
+        
     def moderate_image(self, image_path: str) -> Dict:
         """
         Moderate an uploaded image for inappropriate content
@@ -1194,7 +1200,15 @@ class ImageModerationService:
             Dict with moderation results including confidence score and flags
         """
         try:
-            # Try Google Vision API first (most accurate)
+            # Try NudeNet first (local AI, fast and free)
+            try:
+                result = self._moderate_nudenet(image_path)
+                if result:
+                    return result
+            except Exception as e:
+                logger.warning(f"NudeNet moderation failed: {e}")
+            
+            # Try Google Vision API as fallback
             if self.google_api_key:
                 try:
                     result = self._moderate_google_vision(image_path)
@@ -1212,7 +1226,7 @@ class ImageModerationService:
                 except Exception as e:
                     logger.warning(f"AWS Rekognition moderation failed: {e}")
             
-            # Fallback to basic file analysis
+            # Fallback to basic file analysis (very permissive)
             return self._basic_image_analysis(image_path)
             
         except Exception as e:
@@ -1223,6 +1237,139 @@ class ImageModerationService:
                 'provider': 'fallback',
                 'safe': False  # Default to unsafe when moderation fails
             }
+    
+    def _moderate_nudenet(self, image_path: str) -> Optional[Dict]:
+        """
+        Moderate using NudeNet + YOLO (local AI models)
+        - NudeNet: Detects nudity and NSFW content
+        - YOLO: Detects weapons, drugs, and other inappropriate objects
+        """
+        try:
+            from nudenet import NudeDetector
+        except ImportError:
+            logger.warning("NudeNet not installed, skipping local AI moderation")
+            return None
+        
+        # Lazy load the detector (it's heavy, so only load once)
+        if self._nudenet_detector is None:
+            logger.info("Loading NudeNet detector model...")
+            self._nudenet_detector = NudeDetector()
+            logger.info("NudeNet detector loaded successfully")
+        
+        # Run NudeNet detection for NSFW content
+        detections = self._nudenet_detector.detect(image_path)
+        
+        flags = []
+        max_confidence = 0.0
+        
+        # === STEP 1: Check for NSFW content (nudity) ===
+        nsfw_labels = {
+            'EXPOSED_ANUS', 'EXPOSED_GENITALIA_F', 'EXPOSED_GENITALIA_M',
+            'EXPOSED_BREAST_F', 'BUTTOCKS_EXPOSED'
+        }
+        
+        racy_labels = {
+            'EXPOSED_BUTTOCKS', 'COVERED_GENITALIA_F', 'COVERED_GENITALIA_M',
+        }
+        
+        for detection in detections:
+            label = detection.get('class', '')
+            score = detection.get('score', 0.0)
+            max_confidence = max(max_confidence, score)
+            
+            if label in nsfw_labels and score > 0.5:
+                flags.append('nudity')
+                logger.warning(f"NSFW content detected: {label} (score: {score:.2f})")
+            elif label in racy_labels and score > 0.6:
+                flags.append('racy')
+                logger.info(f"Racy content detected: {label} (score: {score:.2f})")
+        
+        # === STEP 2: Check for inappropriate objects (weapons, drugs, etc.) ===
+        object_flags, has_objects_detected = self._detect_inappropriate_objects(image_path)
+        flags.extend(object_flags)
+        
+        # Determine overall confidence
+        if flags:
+            # Found inappropriate content, low confidence it's safe
+            confidence = max(0.1, 1.0 - max_confidence) if max_confidence > 0 else 0.2
+        else:
+            # No inappropriate content detected, high confidence it's safe
+            # Note: We don't require gym-related objects because legitimate gym photos
+            # (locker rooms, walls, equipment close-ups, etc.) might not contain them
+            confidence = 0.95
+        
+        return {
+            'confidence': confidence,
+            'flags': list(set(flags)),  # Remove duplicates
+            'provider': 'nudenet+yolo',
+            'safe': len(flags) == 0,
+            'details': {
+                'detections_count': len(detections),
+                'max_detection_score': max_confidence
+            }
+        }
+    
+    def _detect_inappropriate_objects(self, image_path: str) -> tuple:
+        """
+        Detect inappropriate objects (weapons, drugs, etc.) using YOLOv8
+        Returns tuple: (flags, has_objects_detected)
+        - flags: list of inappropriate content flags
+        - has_objects_detected: True if ANY objects were detected (image is readable)
+        """
+        try:
+            from ultralytics import YOLO
+        except ImportError:
+            logger.warning("Ultralytics not installed, skipping object detection")
+            return ([], True)  # Assume valid if detection unavailable
+        
+        flags = []
+        has_objects_detected = False
+        
+        try:
+            # Load YOLOv8 nano model (fast and efficient)
+            # Model will auto-download on first use (~6MB)
+            model = YOLO('yolov8n.pt')
+            
+            # Define inappropriate objects (COCO dataset classes)
+            # Note: We're strict on weapons, lenient on bottles/cups
+            # (since water bottles are common in gyms)
+            inappropriate_objects = {
+                'knife': 'inappropriate_objects',
+                'scissors': 'inappropriate_objects',
+            }
+            
+            # Run inference with verbose=False to reduce output
+            results = model(image_path, verbose=False, conf=0.25)  # Lower confidence threshold
+            
+            # Process detections
+            for result in results:
+                if len(result.boxes) > 0:
+                    has_objects_detected = True
+                    logger.info(f"YOLOv8 detected {len(result.boxes)} objects in image")
+                else:
+                    logger.info(f"YOLOv8 detected no objects - image might be wall, floor, locker room, etc.")
+                
+                for box in result.boxes:
+                    # Get class name and confidence
+                    class_id = int(box.cls[0])
+                    class_name = model.names[class_id]
+                    confidence = float(box.conf[0])
+                    
+                    # Debug: Log all detections
+                    logger.info(f"  - Detected: {class_name} (confidence: {confidence:.2f})")
+                    
+                    # Check for inappropriate objects ONLY
+                    if class_name in inappropriate_objects:
+                        flag = inappropriate_objects[class_name]
+                        flags.append(flag)
+                        logger.warning(f"🚨 Inappropriate object detected: {class_name} (confidence: {confidence:.2f})")
+            
+        except Exception as e:
+            logger.error(f"Object detection failed: {e}")
+            # Don't fail the whole moderation if object detection fails
+            return ([], True)
+        
+        return (flags, has_objects_detected)
     
     def _moderate_google_vision(self, image_path: str) -> Optional[Dict]:
         """Moderate using Google Vision API Safe Search"""
@@ -1424,30 +1571,28 @@ class ImageModerationService:
             moderation_result: Result from moderate_image()
             
         Returns:
-            'approved', 'rejected', or 'pending'
+            'approved' or 'rejected' (fully automatic, no pending status)
         """
         confidence = moderation_result.get('confidence', 0.5)
         flags = moderation_result.get('flags', [])
         
         # Auto-reject for certain flags regardless of confidence
-        auto_reject_flags = ['nudity', 'violence', 'inappropriate_objects']
+        auto_reject_flags = ['nudity', 'violence', 'inappropriate_objects', 'racy']
         if any(flag in auto_reject_flags for flag in flags):
             return 'rejected'
-        
-        # For 'racy' content, be more lenient - flag for manual review instead of auto-reject
-        if 'racy' in flags:
-            return 'pending'  # Let staff decide if it's appropriate gym content
-        
-        # Auto-approve if high confidence and no concerning flags
-        if confidence >= self.auto_approve_threshold and not flags:
-            return 'approved'
         
         # Auto-reject if very low confidence
         if confidence <= self.auto_reject_threshold:
             return 'rejected'
         
-        # Otherwise, flag for manual review
-        return 'pending'
+        # Auto-approve if high confidence and no concerning flags
+        if confidence >= self.auto_approve_threshold and not flags:
+            return 'approved'
+        
+        # For medium confidence (0.3 - 0.8), err on the side of approval
+        # since it's better UX to approve borderline gym photos than reject them
+        # Users can still report inappropriate photos later
+        return 'approved'
     
     def get_rejection_reason(self, moderation_result: Dict) -> str:
         """Get the appropriate rejection reason based on moderation results"""

@@ -68,7 +68,8 @@ class Gym(models.Model):
     website = models.URLField(blank=True)
     google_rating = models.DecimalField(max_digits=2, decimal_places=1, null=True, blank=True)
     google_user_ratings_total = models.IntegerField(null=True, blank=True)
-    photo_reference = models.CharField(blank=True)
+    photo_reference = models.CharField(blank=True)  # Legacy: first photo only
+    photo_references = models.JSONField(default=list, blank=True)  # Store all Google photo references
     types = models.JSONField(default=list, blank=True)  # Store Google Places types
     opening_hours = models.JSONField(null=True, blank=True)  # Store opening hours
     created_at = models.DateTimeField(auto_now_add=True)
@@ -206,6 +207,10 @@ class Review(models.Model):
     
     # Track if user would recommend this gym
     would_recommend = models.BooleanField(default=True)
+    
+    # Anonymous posting (per-review basis)
+    is_anonymous = models.BooleanField(default=False, 
+                                      help_text="If True, this review will be shown as anonymous")
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

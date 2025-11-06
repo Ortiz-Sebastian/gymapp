@@ -19,6 +19,25 @@ import logging
 User = get_user_model()
 logger = logging.getLogger(__name__)
 
+@api_view(['PATCH'])
+@permission_classes([permissions.IsAuthenticated])
+def update_user_preferences(request):
+    """
+    Update user preferences like anonymous posting
+    """
+    user = request.user
+    
+    if 'is_anonymous_account' in request.data:
+        user.is_anonymous_account = request.data['is_anonymous_account']
+    
+    if 'display_name' in request.data:
+        user.display_name = request.data['display_name']
+    
+    user.save()
+    
+    serializer = UserSerializer(user)
+    return Response(serializer.data)
+
 class CustomTokenObtainPairView(TokenObtainPairView):
     """
     Custom login view that returns user data along with tokens
@@ -38,7 +57,6 @@ class RegisterView(APIView):
     """
     permission_classes = [permissions.AllowAny]
     
-    @rate_limit_auth(max_requests=3, window=300)  # 3 attempts per 5 minutes
     def post(self, request):
         serializer = UserSerializer(data=request.data)
         if serializer.is_valid():
