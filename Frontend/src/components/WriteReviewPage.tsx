@@ -16,6 +16,8 @@ const WriteReviewPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [selectedPhotos, setSelectedPhotos] = useState<File[]>([]);
   const [photoPreviewUrls, setPhotoPreviewUrls] = useState<string[]>([]);
+  const [existingPhotos, setExistingPhotos] = useState<Array<{id: number; photo: string; caption: string}>>([]);
+  const [photosToDelete, setPhotosToDelete] = useState<number[]>([]); // Track photos to delete
   const isEditMode = !!reviewId;
 
   const [formData, setFormData] = useState({
@@ -89,6 +91,8 @@ const WriteReviewPage: React.FC = () => {
       
       if (response.ok) {
         const review = await response.json();
+        console.log('📥 Fetched existing review:', review);
+        
         // Populate form with existing review data
         setFormData({
           equipment_rating: review.equipment_rating,
@@ -101,6 +105,16 @@ const WriteReviewPage: React.FC = () => {
           would_recommend: review.would_recommend,
           is_anonymous: review.is_anonymous,
         });
+        
+        // Load existing photos if any
+        if (review.photos && review.photos.length > 0) {
+          console.log(`📸 Found ${review.photos.length} existing photos for review`);
+          setExistingPhotos(review.photos.map((photo: any) => ({
+            id: photo.id,
+            photo: photo.photo,
+            caption: photo.caption || ''
+          })));
+        }
       } else {
         setError('Failed to load review');
       }
@@ -113,9 +127,13 @@ const WriteReviewPage: React.FC = () => {
   const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     
-    // Limit to 5 photos
-    if (files.length + selectedPhotos.length > 5) {
-      setError('You can upload a maximum of 5 photos');
+    // Calculate total photos: existing (not deleted) + new
+    const remainingExistingPhotos = existingPhotos.filter(p => !photosToDelete.includes(p.id)).length;
+    const totalPhotos = remainingExistingPhotos + selectedPhotos.length + files.length;
+    
+    // Limit to 5 photos total
+    if (totalPhotos > 5) {
+      setError('You can have a maximum of 5 photos total (existing + new)');
       return;
     }
     
@@ -153,16 +171,48 @@ const WriteReviewPage: React.FC = () => {
     setPhotoPreviewUrls(prev => prev.filter((_, i) => i !== index));
   };
 
-  const uploadPhotos = async (token: string) => {
-    // Upload photos one by one
+  const removeExistingPhoto = (photoId: number) => {
+    // Mark photo for deletion (will be deleted on submit)
+    setPhotosToDelete(prev => [...prev, photoId]);
+    // Remove from display
+    setExistingPhotos(prev => prev.filter(p => p.id !== photoId));
+  };
+
+  const deletePhotos = async (token: string, photoIds: number[]) => {
+    // Delete photos that were marked for removal
+    const deletePromises = photoIds.map(async (photoId) => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/photos/${photoId}/`, {
+          method: 'DELETE',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+          },
+        });
+        
+        if (!response.ok) {
+          console.error(`Failed to delete photo ${photoId}:`, response.status);
+        } else {
+          console.log(`✅ Photo ${photoId} deleted successfully`);
+        }
+      } catch (err) {
+        console.error(`Error deleting photo ${photoId}:`, err);
+      }
+    });
+    
+    await Promise.all(deletePromises);
+  };
+
+  const uploadPhotos = async (token: string, reviewId: number) => {
+    // Upload photos one by one and link them to the review
     const uploadPromises = selectedPhotos.map(async (photo) => {
       const formData = new FormData();
       formData.append('photo', photo);
       formData.append('gym', placeId!);
+      formData.append('review', reviewId.toString()); // Link photo to review
       formData.append('caption', ''); // Optional caption
       
       try {
-        const response = await fetch(`${API_BASE_URL}/gym-photos/`, {
+        const response = await fetch(`${API_BASE_URL}/photos/`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${token}`,
@@ -171,7 +221,11 @@ const WriteReviewPage: React.FC = () => {
         });
         
         if (!response.ok) {
-          console.error('Failed to upload photo:', photo.name);
+          const errorData = await response.json().catch(() => ({}));
+          console.error('Failed to upload photo:', photo.name, response.status, errorData);
+        } else {
+          const data = await response.json();
+          console.log('✅ Photo uploaded successfully:', data);
         }
       } catch (err) {
         console.error('Error uploading photo:', err);
@@ -236,15 +290,59 @@ const WriteReviewPage: React.FC = () => {
       const data = await response.json();
 
       if (response.ok) {
-        // Upload photos if any were selected (only for new reviews, not edits)
-        if (!isEditMode && selectedPhotos.length > 0) {
-          await uploadPhotos(token);
+        const reviewIdToUse = isEditMode ? reviewId : data.id;
+        
+        // Delete photos marked for removal (edit mode only)
+        if (isEditMode && photosToDelete.length > 0) {
+          console.log(`🗑️  Deleting ${photosToDelete.length} photos from review`);
+          await deletePhotos(token, photosToDelete);
         }
+        
+        // Upload new photos if any were selected
+        if (selectedPhotos.length > 0 && reviewIdToUse) {
+          console.log(`📤 Uploading ${selectedPhotos.length} photos to review ${reviewIdToUse} (edit mode: ${isEditMode})`);
+          await uploadPhotos(token, parseInt(reviewIdToUse));
+          console.log('✅ All photos uploaded successfully');
+        }
+        
+        // Small delay to ensure backend has processed everything
+        await new Promise(resolve => setTimeout(resolve, 500));
         
         // Success! Navigate back to gym detail page
         navigate(`/gym/${placeId}`);
       } else {
-        setError(data.detail || data.error || 'Failed to submit review. Please try again.');
+        // Handle DRF ValidationError format - can be string, object, or array
+        let errorMessage = 'Failed to submit review. Please try again.';
+        let existingReviewId = null;
+        
+        if (typeof data === 'string') {
+          errorMessage = data;
+        } else if (data.error) {
+          errorMessage = typeof data.error === 'string' ? data.error : data.error[0] || errorMessage;
+          existingReviewId = data.existing_review_id;
+        } else if (data.detail) {
+          errorMessage = typeof data.detail === 'string' ? data.detail : data.detail[0] || errorMessage;
+        } else if (data.non_field_errors) {
+          errorMessage = Array.isArray(data.non_field_errors) ? data.non_field_errors[0] : data.non_field_errors;
+        }
+        
+        // Check if it's a duplicate review error
+        if (errorMessage.includes('already posted a review') && (existingReviewId || data.existing_review_id)) {
+          const reviewId = existingReviewId || data.existing_review_id;
+          // Offer to edit the existing review
+          const editReview = window.confirm(
+            'You have already posted a review for this gym. Would you like to edit your existing review instead?'
+          );
+          
+          if (editReview) {
+            // Navigate to edit the existing review
+            navigate(`/gym/${placeId}/review/edit/${reviewId}`);
+          } else {
+            setError(errorMessage);
+          }
+        } else {
+          setError(errorMessage);
+        }
       }
     } catch (err) {
       console.error('Error submitting review:', err);
@@ -417,42 +515,77 @@ const WriteReviewPage: React.FC = () => {
                 multiple
                 onChange={handlePhotoSelect}
                 className="hidden"
-                disabled={selectedPhotos.length >= 5}
+                disabled={(existingPhotos.filter(p => !photosToDelete.includes(p.id)).length + selectedPhotos.length) >= 5}
               />
               
-              {/* Photo Previews */}
+              {/* Existing Photos (Edit Mode) */}
+              {existingPhotos.length > 0 && (
+                <div className="mt-4">
+                  <p className="text-sm font-medium text-gray-700 mb-2">Current Photos</p>
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                    {existingPhotos.map((photo) => (
+                      <div key={photo.id} className="relative group">
+                        <img
+                          src={photo.photo}
+                          alt={photo.caption || 'Review photo'}
+                          className="w-full h-24 object-cover rounded-lg border-2 border-gray-200"
+                        />
+                        {/* Remove Button */}
+                        <button
+                          type="button"
+                          onClick={() => removeExistingPhoto(photo.id)}
+                          className="absolute top-2 right-2 bg-red-500 hover:bg-red-600 text-white rounded-full p-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                          aria-label="Remove photo"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                        {photo.caption && (
+                          <p className="text-xs text-gray-500 mt-1 truncate">{photo.caption}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              
+              {/* New Photo Previews */}
               {photoPreviewUrls.length > 0 && (
-                <div className="mt-4 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-                  {photoPreviewUrls.map((url, index) => (
-                    <div key={index} className="relative group">
-                      <img
-                        src={url}
-                        alt={`Preview ${index + 1}`}
-                        className="w-full h-32 object-cover rounded-lg border-2 border-gray-200"
-                      />
-                      {/* Remove Button */}
-                      <button
-                        type="button"
-                        onClick={() => removePhoto(index)}
-                        className="absolute top-2 right-2 bg-red-500 hover:bg-red-600 text-white rounded-full p-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
-                        aria-label="Remove photo"
-                      >
-                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      </button>
-                      {/* Photo info */}
-                      <p className="text-xs text-gray-500 mt-1 truncate">
-                        {selectedPhotos[index].name}
-                      </p>
-                    </div>
-                  ))}
+                <div className="mt-4">
+                  {existingPhotos.length > 0 && <p className="text-sm font-medium text-gray-700 mb-2">New Photos</p>}
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                    {photoPreviewUrls.map((url, index) => (
+                      <div key={index} className="relative group">
+                        <img
+                          src={url}
+                          alt={`Preview ${index + 1}`}
+                          className="w-full h-24 object-cover rounded-lg border-2 border-blue-200"
+                        />
+                        {/* Remove Button */}
+                        <button
+                          type="button"
+                          onClick={() => removePhoto(index)}
+                          className="absolute top-2 right-2 bg-red-500 hover:bg-red-600 text-white rounded-full p-1.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                          aria-label="Remove photo"
+                        >
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                        {/* Photo info */}
+                        <p className="text-xs text-gray-500 mt-1 truncate">
+                          {selectedPhotos[index].name}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
               
               <p className="text-xs text-gray-500 mt-2">
-                {selectedPhotos.length}/5 photos selected
-                {selectedPhotos.length > 0 && ' • Photos will be reviewed before appearing publicly'}
+                {existingPhotos.filter(p => !photosToDelete.includes(p.id)).length + selectedPhotos.length}/5 photos
+                {selectedPhotos.length > 0 && ' • New photos will be reviewed before appearing publicly'}
               </p>
             </div>
 

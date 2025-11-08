@@ -547,7 +547,6 @@ const HomePage: React.FC = () => {
                 error={error}
                 onGymClick={handleGymClick}
                 selectedPlaceId={selectedPlaceId}
-                onSelectPlaceId={setSelectedPlaceId}
               />
             </div>
           </div>

@@ -755,7 +755,7 @@ class GooglePlacesService:
         
         params = {
             'place_id': place_id,
-            'fields': 'place_id,name,formatted_address,geometry,rating,user_ratings_total,formatted_phone_number,website,opening_hours,photos,types',
+            'fields': 'place_id,name,formatted_address,geometry,formatted_phone_number,website,opening_hours,photos,types',
             'key': self.api_key
         }
         

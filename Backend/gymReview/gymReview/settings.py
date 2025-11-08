@@ -21,7 +21,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Configure decouple to look for .env file in the Backend directory
 config = Config(RepositoryEnv(os.path.join(BASE_DIR.parent, '.env')))
 
-# GDAL configuration for macOS
+# GDAL configuration for different platforms
 if os.name == 'nt':  # Windows
     OSGEO4W = r"C:\OSGeo4W"
     if 'OSGEO4W_ROOT' not in os.environ:
@@ -31,10 +31,69 @@ if os.name == 'nt':  # Windows
         os.environ['PATH'] = OSGEO4W + r"\bin;" + os.environ['PATH']
     GDAL_LIBRARY_PATH = r'C:\OSGeo4W\bin\gdal310.dll'
     GEOS_LIBRARY_PATH = r'C:\OSGeo4W\bin\geos_c.dll'
-else:  # macOS/Linux
-    # Homebrew GDAL paths
-    GDAL_LIBRARY_PATH = '/opt/homebrew/lib/libgdal.dylib'
-    GEOS_LIBRARY_PATH = '/opt/homebrew/lib/libgeos_c.dylib'
+else:  # Linux/Docker - try to find dynamically
+    import glob
+    import subprocess
+    
+    # First, try environment variable
+    gdal_env = os.getenv('GDAL_LIBRARY_PATH', '').strip()
+    if gdal_env and os.path.exists(gdal_env):
+        GDAL_LIBRARY_PATH = gdal_env
+    else:
+        # Try to find GDAL library in common locations
+        gdal_paths = []
+        # Check common Linux library paths
+        for pattern in [
+            '/usr/lib/x86_64-linux-gnu/libgdal.so*',
+            '/usr/lib/aarch64-linux-gnu/libgdal.so*',
+            '/usr/lib/*/libgdal.so*',
+            '/usr/local/lib/libgdal.so*'
+        ]:
+            gdal_paths.extend(glob.glob(pattern))
+        
+        # Also try using find command if glob doesn't work
+        if not gdal_paths:
+            try:
+                result = subprocess.run(
+                    ['find', '/usr/lib', '-name', 'libgdal.so*', '-type', 'f'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    gdal_paths = [p.strip() for p in result.stdout.split('\n') if p.strip()]
+            except:
+                pass
+        
+        # Use first found path, or try hardcoded paths
+        if gdal_paths:
+            GDAL_LIBRARY_PATH = sorted(gdal_paths)[0]  # Prefer .so over .so.X versions
+        elif os.path.exists('/usr/lib/x86_64-linux-gnu/libgdal.so'):
+            GDAL_LIBRARY_PATH = '/usr/lib/x86_64-linux-gnu/libgdal.so'
+        elif os.path.exists('/usr/lib/aarch64-linux-gnu/libgdal.so'):
+            GDAL_LIBRARY_PATH = '/usr/lib/aarch64-linux-gnu/libgdal.so'
+        else:
+            # macOS fallback
+            GDAL_LIBRARY_PATH = '/opt/homebrew/lib/libgdal.dylib'
+    
+    # Find GEOS library
+    geos_paths = []
+    for pattern in [
+        '/usr/lib/x86_64-linux-gnu/libgeos_c.so*',
+        '/usr/lib/aarch64-linux-gnu/libgeos_c.so*',
+        '/usr/lib/*/libgeos_c.so*',
+        '/usr/local/lib/libgeos_c.so*'
+    ]:
+        geos_paths.extend(glob.glob(pattern))
+    
+    if geos_paths:
+        GEOS_LIBRARY_PATH = sorted(geos_paths)[0]
+    elif os.path.exists('/usr/lib/x86_64-linux-gnu/libgeos_c.so'):
+        GEOS_LIBRARY_PATH = '/usr/lib/x86_64-linux-gnu/libgeos_c.so'
+    elif os.path.exists('/usr/lib/aarch64-linux-gnu/libgeos_c.so'):
+        GEOS_LIBRARY_PATH = '/usr/lib/aarch64-linux-gnu/libgeos_c.so'
+    else:
+        GEOS_LIBRARY_PATH = '/opt/homebrew/lib/libgeos_c.dylib'
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
@@ -128,15 +187,16 @@ WSGI_APPLICATION = 'gymReview.wsgi.application'
 # Database configuration
 # For development, use SQLite (easier setup)
 # For production, use PostgreSQL with PostGIS
-if config('USE_POSTGRES', default='False').lower() == 'true':
+if config('USE_POSTGRES', default='False').lower() == 'true' or os.getenv('POSTGRES_HOST'):
+    # Use PostgreSQL with PostGIS (for Docker or production)
     DATABASES = {
         'default': {
             'ENGINE': 'django.contrib.gis.db.backends.postgis',
-            'NAME': 'gymreview17',
-            'USER': 'sebastianortiz',
-            'PASSWORD': os.getenv('DATABASE_PASSWORD', ''),
-            'HOST': 'localhost',
-            'PORT': '5432',
+            'NAME': os.getenv('POSTGRES_DB', config('POSTGRES_DB', default='gymapp')),
+            'USER': os.getenv('POSTGRES_USER', config('POSTGRES_USER', default='gymapp_user')),
+            'PASSWORD': os.getenv('POSTGRES_PASSWORD', config('POSTGRES_PASSWORD', default='')),
+            'HOST': os.getenv('POSTGRES_HOST', config('POSTGRES_HOST', default='localhost')),
+            'PORT': os.getenv('POSTGRES_PORT', config('POSTGRES_PORT', default='5432')),
         }
     }
 else:
@@ -185,7 +245,11 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+# Use environment variable for MEDIA_ROOT in production (Docker), fallback to BASE_DIR/media for development
+MEDIA_ROOT = os.getenv('MEDIA_ROOT', str(BASE_DIR / 'media'))
+# Ensure MEDIA_ROOT is a Path object
+if isinstance(MEDIA_ROOT, str):
+    MEDIA_ROOT = Path(MEDIA_ROOT)
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field

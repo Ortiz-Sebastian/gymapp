@@ -50,6 +50,7 @@ class ReviewSerializer(serializers.ModelSerializer):
     overall_rating = serializers.ReadOnlyField()
     helpful_votes = serializers.ReadOnlyField()
     not_helpful_votes = serializers.ReadOnlyField()
+    photos = serializers.SerializerMethodField()
     
     class Meta:
         model = Review
@@ -57,11 +58,11 @@ class ReviewSerializer(serializers.ModelSerializer):
             'id', 'user', 'gym', 'gym_detail',
             'equipment_rating', 'cleanliness_rating',
             'staff_rating', 'value_rating', 'atmosphere_rating', 'programs_classes_rating',
-            'overall_rating', 'review_text', 'review_photo', 'would_recommend',
+            'overall_rating', 'review_text', 'review_photo', 'photos', 'would_recommend',
             'is_anonymous', 'helpful_votes', 'not_helpful_votes',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['user', 'gym_detail', 'created_at', 'updated_at', 'helpful_votes', 'not_helpful_votes']
+        read_only_fields = ['user', 'gym_detail', 'created_at', 'updated_at', 'helpful_votes', 'not_helpful_votes', 'photos']
     
     def get_user(self, obj):
         """Return display name - show as Anonymous if is_anonymous is True"""
@@ -76,6 +77,32 @@ class ReviewSerializer(serializers.ModelSerializer):
             'name': obj.gym.name,
             'address': obj.gym.address
         }
+    
+    def get_photos(self, obj):
+        """Return photos linked to this review (only approved photos, or pending/approved for review owner)"""
+        request = self.context.get('request')
+        
+        # Debug: Check all photos for this review (including unlinked ones)
+        all_photos_count = GymPhoto.objects.filter(review=obj).count()
+        print(f"🔍 Review {obj.id}: Total photos in DB linked to this review: {all_photos_count}")
+        
+        # For review owner, show approved and pending photos
+        if request and request.user.is_authenticated and obj.user == request.user:
+            photos = obj.photos.filter(moderation_status__in=['approved', 'pending'])
+            print(f"   👤 User is review owner - showing approved + pending photos")
+        else:
+            # For others, only show approved photos
+            photos = obj.photos.filter(moderation_status='approved')
+            print(f"   👥 User is not owner - showing only approved photos")
+        
+        photos_list = list(photos.all())
+        print(f"   📊 Filtered to {len(photos_list)} photos after moderation filter")
+        
+        photo_data = GymPhotoSerializer(photos_list, many=True, context=self.context).data
+        print(f"📸 Review {obj.id}: Returning {len(photo_data)} photos")
+        for idx, photo in enumerate(photo_data):
+            print(f"   Photo {idx + 1}: ID={photo.get('id')}, URL={photo.get('photo', 'NO URL')}, status={photo.get('moderation_status')}")
+        return photo_data
 
 # CommentSerializer removed - reviews now include text directly
 
@@ -86,7 +113,7 @@ class GymPhotoSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = GymPhoto
-        fields = ['id', 'gym', 'photo', 'uploaded_by', 'is_google_photo', 
+        fields = ['id', 'gym', 'photo', 'review', 'uploaded_by', 'is_google_photo', 
                  'caption', 'likes_count', 'moderation_status', 'uploaded_at']
         read_only_fields = ['uploaded_by', 'uploaded_at', 'likes_count', 'moderation_status']
 
@@ -162,28 +189,58 @@ class GymSerializer(serializers.ModelSerializer):
         read_only_fields = ['place_id', 'created_at', 'updated_at']
     
     def get_average_equipment_rating(self, obj):
-        return obj.avg_equipment_rating
+        # Check for annotated value first (db_ prefix), then cached, then property
+        val = getattr(obj, 'db_avg_equipment_rating', None) or getattr(obj, '_cached_avg_equipment_rating', None)
+        if val is not None:
+            return round(float(val), 1)
+        # Fallback to property (will do query if not annotated)
+        return getattr(obj, 'avg_equipment_rating', 0)
     
     def get_average_cleanliness_rating(self, obj):
-        return obj.avg_cleanliness_rating
+        val = getattr(obj, 'db_avg_cleanliness_rating', None) or getattr(obj, '_cached_avg_cleanliness_rating', None)
+        if val is not None:
+            return round(float(val), 1)
+        return getattr(obj, 'avg_cleanliness_rating', 0)
     
     def get_average_staff_rating(self, obj):
-        return obj.avg_staff_rating
+        val = getattr(obj, 'db_avg_staff_rating', None) or getattr(obj, '_cached_avg_staff_rating', None)
+        if val is not None:
+            return round(float(val), 1)
+        return getattr(obj, 'avg_staff_rating', 0)
     
     def get_average_value_rating(self, obj):
-        return obj.avg_value_rating
+        val = getattr(obj, 'db_avg_value_rating', None) or getattr(obj, '_cached_avg_value_rating', None)
+        if val is not None:
+            return round(float(val), 1)
+        return getattr(obj, 'avg_value_rating', 0)
     
     def get_average_atmosphere_rating(self, obj):
-        return obj.avg_atmosphere_rating
+        val = getattr(obj, 'db_avg_atmosphere_rating', None) or getattr(obj, '_cached_avg_atmosphere_rating', None)
+        if val is not None:
+            return round(float(val), 1)
+        return getattr(obj, 'avg_atmosphere_rating', 0)
     
     def get_average_programs_classes_rating(self, obj):
-        return obj.avg_programs_classes_rating
+        val = getattr(obj, 'db_avg_programs_classes_rating', None) or getattr(obj, '_cached_avg_programs_classes_rating', None)
+        if val is not None:
+            return round(float(val), 1)
+        return getattr(obj, 'avg_programs_classes_rating', 0)
     
     def get_average_overall_rating(self, obj):
-        return obj.overall_avg_rating
+        # Check for annotated value first (db_ prefix), then property
+        val = getattr(obj, 'db_avg_overall_rating', None)
+        if val is not None:
+            return round(float(val), 1)
+        # Fallback to property
+        return getattr(obj, 'overall_avg_rating', 0)
     
     def get_review_count(self, obj):
-        return obj.reviews.count()
+        # Use annotated value if available (avoids query)
+        val = getattr(obj, 'db_review_count', None)
+        if val is not None:
+            return val
+        # Fallback to property/query
+        return getattr(obj, 'review_count', 0) if hasattr(obj, 'review_count') else obj.reviews.count()
 
 
 class GymDetailSerializer(GymSerializer):

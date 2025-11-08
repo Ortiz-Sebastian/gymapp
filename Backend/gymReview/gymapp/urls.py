@@ -29,6 +29,9 @@ router.register(r'gym-claims', views.GymClaimViewSet)
 urlpatterns = [
     path('', include(router.urls)),
     
+    # Health check endpoint for Docker
+    path('health/', views.health_check, name='health_check'),
+    
     # Authentication endpoints
     path('auth/login/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('auth/refresh/', TokenRefreshView.as_view(), name='token_refresh'),

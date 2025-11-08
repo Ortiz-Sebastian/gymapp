@@ -23,9 +23,33 @@ from .services import GooglePlacesService, GeocodingService, LocationValidationS
 User = get_user_model()
 
 # Create your views here.
-from django.http import HttpResponse 
+from django.http import HttpResponse, JsonResponse
+from django.db import connection
+from rest_framework.decorators import api_view, permission_classes as perm_classes
+
 def index(request): 
     return HttpResponse("Hello, world. This is the index view of Demoapp.")
+
+@api_view(['GET'])
+@perm_classes([permissions.AllowAny])
+def health_check(request):
+    """Health check endpoint for Docker container orchestration"""
+    try:
+        # Check database connection
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+        
+        return JsonResponse({
+            'status': 'healthy',
+            'database': 'connected',
+            'service': 'gymapp-backend'
+        }, status=200)
+    except Exception as e:
+        return JsonResponse({
+            'status': 'unhealthy',
+            'database': 'disconnected',
+            'error': str(e)
+        }, status=503)
 
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
@@ -275,6 +299,8 @@ class GymViewSet(viewsets.ModelViewSet):
         - search_text: text to search for in gym names/addresses (optional)
         """
         import traceback
+        import time
+        function_start_time = time.time()
         print("=" * 80)
         print("🔍 search_google_places called")
         print("=" * 80)
@@ -379,13 +405,16 @@ class GymViewSet(viewsets.ModelViewSet):
             print(f"Calling Google Places API with radius: {radius_miles} miles")
             
             # Search for gyms
+            start_time = time.time()
             places_data = places_service.search_gyms_nearby(
                 latitude=latitude,
                 longitude=longitude,
                 radius=radius_meters
             )
+            print(f"⏱️  Google Places API call: {(time.time() - start_time)*1000:.2f}ms")
             
             # Create or update gyms in database (hybrid approach)
+            start_time = time.time()
             created_gyms = []
             new_gyms_count = 0
             existing_gyms_count = 0
@@ -416,21 +445,85 @@ class GymViewSet(viewsets.ModelViewSet):
                 created_gyms = self._filter_gyms_by_search_text(created_gyms, search_text)
                 print(f"Filtered to {len(created_gyms)} gyms matching search text")
             
-            # Serialize and add distance from user location to each gym
-            serializer = self.get_serializer(created_gyms, many=True)
-            gyms_data = serializer.data
+            # Optimize: Refetch as queryset with annotations to avoid N+1 queries
+            import time
+            from django.db.models import Avg, Count
+            start_time = time.time()
             
-            # Add distance from user location to each gym
+            place_ids = [gym.place_id for gym in created_gyms]
+            # Refetch with annotations to avoid N+1 queries on review averages
+            # Use different names to avoid conflicts with @property methods
+            optimized_gyms = Gym.objects.filter(place_id__in=place_ids).annotate(
+                db_avg_equipment_rating=Avg('reviews__equipment_rating'),
+                db_avg_cleanliness_rating=Avg('reviews__cleanliness_rating'),
+                db_avg_staff_rating=Avg('reviews__staff_rating'),
+                db_avg_value_rating=Avg('reviews__value_rating'),
+                db_avg_atmosphere_rating=Avg('reviews__atmosphere_rating'),
+                db_avg_programs_classes_rating=Avg('reviews__programs_classes_rating'),
+                db_review_count=Count('reviews')
+            ).select_related().prefetch_related('reviews')
+            
+            # Convert to list to evaluate queryset and avoid property conflicts
+            optimized_gyms_list = list(optimized_gyms)
+            
+            # Calculate overall_avg_rating in Python (it's computed from other averages)
+            # Store as attributes that serializer can access (bypassing properties)
+            for gym in optimized_gyms_list:
+                if gym.db_review_count and gym.db_review_count > 0:
+                    ratings = [
+                        gym.db_avg_equipment_rating,
+                        gym.db_avg_cleanliness_rating,
+                        gym.db_avg_staff_rating,
+                        gym.db_avg_value_rating,
+                        gym.db_avg_atmosphere_rating,
+                        gym.db_avg_programs_classes_rating
+                    ]
+                    # Filter out None values
+                    valid_ratings = [r for r in ratings if r is not None]
+                    if valid_ratings:
+                        overall = round(sum(valid_ratings) / len(valid_ratings), 1)
+                    else:
+                        overall = 0.0
+                else:
+                    overall = 0.0
+                
+                # Store as attribute (bypassing property)
+                object.__setattr__(gym, 'db_avg_overall_rating', overall)
+            
+            # Preserve original order
+            gyms_dict = {gym.place_id: gym for gym in optimized_gyms_list}
+            optimized_gyms_list = [gyms_dict[pid] for pid in place_ids if pid in gyms_dict]
+            
+            print(f"⏱️  Queryset optimization: {(time.time() - start_time)*1000:.2f}ms")
+            
+            # Create a lookup dictionary for O(1) access instead of O(n) search
+            start_time = time.time()
+            gyms_by_place_id = {gym.place_id: gym for gym in optimized_gyms_list}
+            print(f"⏱️  Dict lookup creation: {(time.time() - start_time)*1000:.2f}ms")
+            
+            # Serialize and add distance from user location to each gym
+            start_time = time.time()
+            serializer = self.get_serializer(optimized_gyms_list, many=True)
+            print(f"⏱️  Serializer creation: {(time.time() - start_time)*1000:.2f}ms")
+            
+            start_time = time.time()
+            gyms_data = serializer.data
+            print(f"⏱️  Serialization (accessing .data): {(time.time() - start_time)*1000:.2f}ms")
+            
+            # Add distance from user location to each gym (optimized with dict lookup)
+            start_time = time.time()
             for gym_data in gyms_data:
-                gym_obj = next((g for g in created_gyms if g.place_id == gym_data['place_id']), None)
+                gym_obj = gyms_by_place_id.get(gym_data['place_id'])
                 if gym_obj and gym_obj.latitude and gym_obj.longitude:
                     distance = calculate_distance(
                         latitude, longitude,
                         float(gym_obj.latitude), float(gym_obj.longitude)
                     )
                     gym_data['distance_miles'] = round(distance, 2)
+            print(f"⏱️  Distance calculation loop: {(time.time() - start_time)*1000:.2f}ms")
             
-            return Response({
+            start_time = time.time()
+            response_data = {
                 'message': f'Found {len(created_gyms)} gyms in the area',
                 'summary': {
                     'total_gyms': len(created_gyms),
@@ -438,7 +531,14 @@ class GymViewSet(viewsets.ModelViewSet):
                     'existing_gyms_found': existing_gyms_count
                 },
                 'gyms': gyms_data
-            }, status=status.HTTP_200_OK)
+            }
+            print(f"⏱️  Response dict creation: {(time.time() - start_time)*1000:.2f}ms")
+            
+            start_time = time.time()
+            response = Response(response_data, status=status.HTTP_200_OK)
+            print(f"⏱️  Response object creation: {(time.time() - start_time)*1000:.2f}ms")
+            
+            return response
             
         except Exception as e:
             print("=" * 80)
@@ -615,7 +715,7 @@ class ReviewViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]  # Require auth to create, allow viewing
 
     def get_queryset(self):
-        queryset = Review.objects.all()
+        queryset = Review.objects.all().prefetch_related('photos')
         
         # Filter by gym if provided (for gym detail page - shows all reviews for that gym)
         gym_place_id = self.request.query_params.get('gym', None)
@@ -627,11 +727,31 @@ class ReviewViewSet(viewsets.ModelViewSet):
             return queryset.filter(user=self.request.user)
         
         # For anonymous users with no gym filter, return empty queryset
-        return Review.objects.none()
+        return Review.objects.none().prefetch_related('photos')
 
     def perform_create(self, serializer):
         # Require authentication to create reviews
-        serializer.save(user=self.request.user)
+        user = self.request.user
+        gym = serializer.validated_data.get('gym')
+        
+        # Check if user already has a review for this gym
+        existing_review = Review.objects.filter(user=user, gym=gym).first()
+        if existing_review:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({
+                'error': 'You have already posted a review for this gym. Please edit your existing review instead.',
+                'existing_review_id': existing_review.id
+            })
+        
+        serializer.save(user=user)
+    
+    def perform_update(self, serializer):
+        # Ensure users can only update their own reviews
+        review = self.get_object()
+        if review.user != self.request.user:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You can only edit your own reviews.")
+        serializer.save()
 
 # CommentViewSet removed - reviews now include text directly
 
@@ -662,7 +782,22 @@ class GymPhotoViewSet(viewsets.ModelViewSet):
         return GymPhotoSerializer
 
     def perform_create(self, serializer):
-        photo = serializer.save(uploaded_by=self.request.user)
+        # Get review if provided
+        review_id = self.request.data.get('review')
+        review = None
+        if review_id:
+            try:
+                # Convert to int if it's a string
+                review_id = int(review_id) if isinstance(review_id, str) else review_id
+                review = Review.objects.get(id=review_id, user=self.request.user)
+                print(f"✅ Linking photo to review {review_id} for user {self.request.user.username}")
+            except (Review.DoesNotExist, ValueError, TypeError) as e:
+                print(f"⚠️  Could not link photo to review {review_id}: {e}")
+                # Review doesn't exist or doesn't belong to user, ignore
+        
+        photo = serializer.save(uploaded_by=self.request.user, review=review)
+        if review:
+            print(f"✅ Photo {photo.id} linked to review {review.id}")
         
         # Run automatic moderation
         try:
@@ -688,6 +823,15 @@ class GymPhotoViewSet(viewsets.ModelViewSet):
             photo.moderation_notes = f"Auto-moderation failed: {str(e)}"
             photo.save()
             logger.error(f"Photo moderation failed for photo {photo.id}: {e}")
+    
+    def perform_destroy(self, instance):
+        # Users can only delete their own photos or photos linked to their reviews
+        if instance.uploaded_by != self.request.user:
+            # Check if photo is linked to a review owned by the user
+            if instance.review and instance.review.user != self.request.user:
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied("You can only delete your own photos or photos from your reviews.")
+        instance.delete()
 
     @action(detail=True, methods=['post'])
     def like(self, request, pk=None):

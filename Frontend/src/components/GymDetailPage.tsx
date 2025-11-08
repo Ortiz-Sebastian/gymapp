@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 
 interface Amenity {
@@ -42,6 +42,13 @@ interface Gym {
   photo_references?: string[];  // Array of Google photo references
 }
 
+interface ReviewPhoto {
+  id: number;
+  photo: string;
+  caption: string;
+  moderation_status: string;
+}
+
 interface Review {
   id: number;
   user: {
@@ -55,6 +62,7 @@ interface Review {
   atmosphere_rating: number;
   programs_classes_rating: number;
   review_text: string;
+  photos?: ReviewPhoto[];
   created_at: string;
   updated_at: string;
   helpful_votes: number;
@@ -72,6 +80,10 @@ const GymDetailPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
   const [currentUsername, setCurrentUsername] = useState<string | null>(null);
+  // Lightbox state for review photos
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [lightboxPhotos, setLightboxPhotos] = useState<ReviewPhoto[]>([]);
+  const [lightboxCurrentIndex, setLightboxCurrentIndex] = useState(0);
 
   const API_BASE_URL = 'http://localhost:8000/api';
   // Photos are now proxied through the backend to avoid CORS issues and keep API key secure
@@ -201,6 +213,17 @@ const GymDetailPage: React.FC = () => {
       console.log('📦 Reviews data received:', data);
       const reviewsArray = data.results || data || [];
       console.log('✅ Setting reviews, count:', reviewsArray.length);
+      
+      // Log photo data for debugging
+      reviewsArray.forEach((review: Review) => {
+        if (review.photos && review.photos.length > 0) {
+          console.log(`📸 Review ${review.id} has ${review.photos.length} photos:`, review.photos);
+          review.photos.forEach((photo, idx) => {
+            console.log(`   Photo ${idx + 1}:`, photo.photo, 'status:', photo.moderation_status);
+          });
+        }
+      });
+      
       setReviews(reviewsArray);
     } catch (err) {
       console.error('❌ Error fetching reviews:', err);
@@ -209,6 +232,48 @@ const GymDetailPage: React.FC = () => {
     }
   };
 
+  // Lightbox functions for review photos
+  const openLightbox = (photos: ReviewPhoto[], startIndex: number = 0) => {
+    setLightboxPhotos(photos);
+    setLightboxCurrentIndex(startIndex);
+    setLightboxOpen(true);
+  };
+
+  const closeLightbox = () => {
+    setLightboxOpen(false);
+    setLightboxPhotos([]);
+    setLightboxCurrentIndex(0);
+  };
+
+  const nextPhoto = useCallback(() => {
+    if (lightboxPhotos.length > 0) {
+      setLightboxCurrentIndex((prev) => (prev + 1) % lightboxPhotos.length);
+    }
+  }, [lightboxPhotos.length]);
+
+  const prevPhoto = useCallback(() => {
+    if (lightboxPhotos.length > 0) {
+      setLightboxCurrentIndex((prev) => (prev - 1 + lightboxPhotos.length) % lightboxPhotos.length);
+    }
+  }, [lightboxPhotos.length]);
+
+  // Handle keyboard navigation in lightbox
+  useEffect(() => {
+    if (!lightboxOpen) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        closeLightbox();
+      } else if (e.key === 'ArrowLeft') {
+        prevPhoto();
+      } else if (e.key === 'ArrowRight') {
+        nextPhoto();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [lightboxOpen, prevPhoto, nextPhoto]);
 
   const renderStars = (rating: number | undefined | null, showNumber: boolean = true) => {
     const validRating = Number(rating) || 0;
@@ -246,7 +311,7 @@ const GymDetailPage: React.FC = () => {
   };
 
   // Render rating distribution bars
-  const renderRatingDistribution = (ratingField: keyof Review, categoryName: string) => {
+  const renderRatingDistribution = (ratingField: keyof Review) => {
     if (reviews.length === 0) return null;
 
     const distribution = calculateRatingDistribution(ratingField);
@@ -336,8 +401,6 @@ const GymDetailPage: React.FC = () => {
                 {photos.map((photo, index) => {
                   const offset = index - currentPhotoIndex;
                   const isActive = index === currentPhotoIndex;
-                  const isPrev = offset === -1;
-                  const isNext = offset === 1;
                   const isVisible = Math.abs(offset) <= 1;
                   
                   return (
@@ -370,7 +433,7 @@ const GymDetailPage: React.FC = () => {
                           style={{ 
                             objectFit: 'cover',
                           }}
-                          onError={(e) => {
+                          onError={() => {
                             console.error('❌ Failed to load carousel image');
                           }}
                           onLoad={() => {
@@ -577,7 +640,7 @@ const GymDetailPage: React.FC = () => {
                   </span>
                 </div>
               </div>
-              {renderRatingDistribution('equipment_rating', 'Equipment')}
+              {renderRatingDistribution('equipment_rating')}
             </div>
 
             {/* Cleanliness */}
@@ -591,7 +654,7 @@ const GymDetailPage: React.FC = () => {
                   </span>
                 </div>
               </div>
-              {renderRatingDistribution('cleanliness_rating', 'Cleanliness')}
+              {renderRatingDistribution('cleanliness_rating')}
             </div>
 
             {/* Staff */}
@@ -605,7 +668,7 @@ const GymDetailPage: React.FC = () => {
                   </span>
                 </div>
               </div>
-              {renderRatingDistribution('staff_rating', 'Staff')}
+              {renderRatingDistribution('staff_rating')}
             </div>
 
             {/* Value */}
@@ -619,7 +682,7 @@ const GymDetailPage: React.FC = () => {
                   </span>
                 </div>
               </div>
-              {renderRatingDistribution('value_rating', 'Value')}
+              {renderRatingDistribution('value_rating')}
             </div>
 
             {/* Atmosphere */}
@@ -633,7 +696,7 @@ const GymDetailPage: React.FC = () => {
                   </span>
                 </div>
               </div>
-              {renderRatingDistribution('atmosphere_rating', 'Atmosphere')}
+              {renderRatingDistribution('atmosphere_rating')}
             </div>
 
             {/* Programs/Classes */}
@@ -647,7 +710,7 @@ const GymDetailPage: React.FC = () => {
                   </span>
                 </div>
               </div>
-              {renderRatingDistribution('programs_classes_rating', 'Programs/Classes')}
+              {renderRatingDistribution('programs_classes_rating')}
             </div>
           </div>
         </div>
@@ -701,6 +764,40 @@ const GymDetailPage: React.FC = () => {
 
                   {/* Review Text */}
                   <p className="text-gray-700 mb-4">{review.review_text}</p>
+
+                  {/* Review Photos */}
+                  {review.photos && review.photos.length > 0 && (
+                    <div className="mb-4">
+                      <div className="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2">
+                        {review.photos.map((photo) => (
+                          <div key={photo.id} className="relative group">
+                            <div className="relative w-full h-32 overflow-hidden rounded-lg bg-gray-100">
+                              <img
+                                src={photo.photo}
+                                alt={photo.caption || 'Review photo'}
+                                className="w-full h-full object-cover cursor-pointer hover:opacity-90 transition-opacity"
+                                onClick={() => {
+                                  // Open photo in lightbox
+                                  if (review.photos && review.photos.length > 0) {
+                                    const photoIndex = review.photos.findIndex(p => p.id === photo.id);
+                                    openLightbox(review.photos, photoIndex >= 0 ? photoIndex : 0);
+                                  }
+                                }}
+                                onError={(e) => {
+                                  // Hide image if it fails to load
+                                  console.error('Failed to load photo:', photo.photo);
+                                  (e.target as HTMLImageElement).style.display = 'none';
+                                }}
+                              />
+                            </div>
+                            {photo.caption && (
+                              <p className="text-xs text-gray-500 mt-1 line-clamp-1">{photo.caption}</p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Detailed Ratings */}
                   <div className="grid grid-cols-2 gap-3 text-sm mb-4">
@@ -778,6 +875,85 @@ const GymDetailPage: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* Lightbox Modal for Review Photos */}
+      {lightboxOpen && lightboxPhotos.length > 0 && (
+        <div 
+          className="fixed inset-0 z-50 bg-black bg-opacity-90 flex items-center justify-center"
+          onClick={closeLightbox}
+        >
+          {/* Close Button */}
+          <button
+            onClick={closeLightbox}
+            className="absolute top-4 right-4 text-white hover:text-gray-300 transition-colors z-10"
+            aria-label="Close lightbox"
+          >
+            <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+
+          {/* Previous Button */}
+          {lightboxPhotos.length > 1 && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                prevPhoto();
+              }}
+              className="absolute left-4 text-white hover:text-gray-300 transition-colors z-10 bg-black bg-opacity-50 rounded-full p-3"
+              aria-label="Previous photo"
+            >
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+              </svg>
+            </button>
+          )}
+
+          {/* Next Button */}
+          {lightboxPhotos.length > 1 && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                nextPhoto();
+              }}
+              className="absolute right-4 text-white hover:text-gray-300 transition-colors z-10 bg-black bg-opacity-50 rounded-full p-3"
+              aria-label="Next photo"
+            >
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              </svg>
+            </button>
+          )}
+
+          {/* Photo Display */}
+          <div 
+            className="max-w-7xl max-h-[90vh] w-full h-full flex items-center justify-center p-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="relative w-full h-full flex flex-col items-center justify-center">
+              <img
+                src={lightboxPhotos[lightboxCurrentIndex].photo}
+                alt={lightboxPhotos[lightboxCurrentIndex].caption || 'Review photo'}
+                className="max-w-full max-h-[85vh] object-contain rounded-lg"
+              />
+              
+              {/* Photo Counter */}
+              {lightboxPhotos.length > 1 && (
+                <div className="mt-4 text-white text-sm">
+                  {lightboxCurrentIndex + 1} / {lightboxPhotos.length}
+                </div>
+              )}
+              
+              {/* Caption */}
+              {lightboxPhotos[lightboxCurrentIndex].caption && (
+                <div className="mt-2 text-white text-sm text-center max-w-2xl">
+                  {lightboxPhotos[lightboxCurrentIndex].caption}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

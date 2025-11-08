@@ -156,6 +156,8 @@ class GymPhoto(models.Model):
     gym = models.ForeignKey(Gym, on_delete=models.CASCADE, related_name='photos')
     photo = models.ImageField(upload_to='gym_photos/')
     uploaded_by = models.ForeignKey(User, on_delete=models.CASCADE)
+    review = models.ForeignKey('Review', on_delete=models.CASCADE, null=True, blank=True, related_name='photos', 
+                               help_text="Optional: Link this photo to a specific review")
     is_google_photo = models.BooleanField(default=False)  # Track if it's from Google
     caption = models.CharField(max_length=200, blank=True, help_text="Optional caption for the photo")
     likes_count = models.PositiveIntegerField(default=0)
@@ -215,28 +217,13 @@ class Review(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        unique_together = ['user', 'gym']  # One review per user per gym
+        ordering = ['-created_at']  # Show newest reviews first
+
     def save(self, *args, **kwargs):
-        # Check if a review from this user for this gym already exists
-        if self.pk is None:  # Only check on creation
-            existing_review = Review.objects.filter(
-                gym=self.gym, 
-                user=self.user
-            ).first()
-            
-            if existing_review:
-                # Update the existing review instead of creating a new one
-                existing_review.equipment_rating = self.equipment_rating
-                existing_review.cleanliness_rating = self.cleanliness_rating
-                existing_review.staff_rating = self.staff_rating
-                existing_review.value_rating = self.value_rating
-                existing_review.atmosphere_rating = self.atmosphere_rating
-                existing_review.review_text = self.review_text
-                existing_review.review_photo = self.review_photo
-                existing_review.would_recommend = self.would_recommend
-                existing_review.updated_at = timezone.now()
-                existing_review.save()
-                return existing_review
-        
+        # Database constraint enforces one review per user per gym
+        # If user wants to update their review, they should use PUT/PATCH
         super().save(*args, **kwargs)
 
     @classmethod
