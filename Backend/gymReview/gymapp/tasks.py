@@ -49,16 +49,3 @@ def update_user_reputations_task():
     except Exception as e:
         logger.error(f"User reputation update failed: {str(e)}")
         raise
-
-
-# Example Celery beat schedule (add to settings.py):
-# CELERY_BEAT_SCHEDULE = {
-#     'promote-amenities-nightly': {
-#         'task': 'gymapp.tasks.promote_amenities_task',
-#         'schedule': crontab(hour=2, minute=0),  # 2 AM daily
-#     },
-#     'update-user-reputations-daily': {
-#         'task': 'gymapp.tasks.update_user_reputations_task',
-#         'schedule': crontab(hour=1, minute=0),  # 1 AM daily
-#     },
-# }

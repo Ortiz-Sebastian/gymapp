@@ -38,8 +38,28 @@ class User(AbstractUser):
         # Bonus for helpful reviews
         helpful_bonus = sum(review.helpful_votes for review in self.reviews.all()) * 2
         
-        # Bonus for verified amenities
-        amenity_bonus = self.added_amenities.filter(is_verified=True).count() * 5
+        # Bonus for verified amenities where user contributed positive assertions
+        # Count distinct gym-amenity combinations where:
+        # 1. User has a positive assertion (has_amenity=True)
+        # 2. The corresponding GymAmenity exists and is verified
+        # Use an efficient query with Exists subquery to check for verified GymAmenity
+        from django.db.models import Exists, OuterRef
+        
+        # Get distinct gym-amenity pairs from positive assertions
+        # and check if corresponding GymAmenity is verified
+        verified_amenities = self.amenity_assertions.filter(
+            has_amenity=True
+        ).annotate(
+            is_verified_amenity=Exists(
+                GymAmenity.objects.filter(
+                    gym=OuterRef('gym'),
+                    amenity=OuterRef('amenity'),
+                    is_verified=True
+                )
+            )
+        ).filter(is_verified_amenity=True).values('gym', 'amenity').distinct()
+        
+        amenity_bonus = verified_amenities.count() * 5
         
         # Penalty for reported content
         reported_penalty = PhotoReport.objects.filter(photo__uploaded_by=self).count() * -10
@@ -186,7 +206,7 @@ class Review(models.Model):
     RATING_CHOICES = [(i, i) for i in range(1, 6)]
     
     gym = models.ForeignKey(Gym, on_delete=models.CASCADE, related_name='reviews')
-    user = models.ForeignKey(User, on_delete=models.CASCADE)  # Require user account
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reviews')  # Require user account
     
     # Specific ratings
     equipment_rating = models.IntegerField(choices=RATING_CHOICES)

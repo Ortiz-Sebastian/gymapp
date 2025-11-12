@@ -41,6 +41,33 @@ const WriteReviewPage: React.FC = () => {
     programs_classes_rating: 0,
   });
 
+  // Amenity voting state - map of amenity name to boolean (true = yes, false = no, undefined = not voted)
+  const [amenityVotes, setAmenityVotes] = useState<Record<string, boolean | undefined>>({});
+  
+  // All amenities from database, grouped by category
+  const [allAmenities, setAllAmenities] = useState<Array<{
+    id: number;
+    name: string;
+    category: number;
+    category_name: string;
+  }>>([]);
+  
+  // Collapsible state for additional amenities section
+  const [amenitiesExpanded, setAmenitiesExpanded] = useState(false);
+  
+  // Original 9 common amenities that should always be visible
+  const commonAmenities = [
+    'Free Weights',
+    'Squat Racks',
+    'StairMaster',
+    'Showers',
+    'Sauna',
+    'Swimming Pool',
+    'Personal Training',
+    'Childcare',
+    'Wheelchair Accessible'
+  ];
+
   const API_BASE_URL = 'http://localhost:8000/api';
 
   useEffect(() => {
@@ -54,6 +81,12 @@ const WriteReviewPage: React.FC = () => {
 
     if (placeId) {
       fetchGymDetails();
+      fetchAllAmenities().then(() => {
+        // After amenities are loaded, fetch user assertions if editing
+        if (isEditMode && reviewId) {
+          fetchUserAssertions();
+        }
+      });
     }
 
     // If in edit mode, fetch the existing review
@@ -77,6 +110,62 @@ const WriteReviewPage: React.FC = () => {
       setError('Failed to load gym details');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchAllAmenities = async () => {
+    try {
+      let allAmenitiesList: any[] = [];
+      let nextUrl = `${API_BASE_URL}/amenities/`;
+      
+      // Handle pagination - fetch all pages
+      while (nextUrl) {
+        const response = await fetch(nextUrl);
+        if (response.ok) {
+          const data = await response.json();
+          const amenities = data.results || data;
+          allAmenitiesList = [...allAmenitiesList, ...amenities];
+          
+          // Check if there's a next page
+          nextUrl = data.next || null;
+        } else {
+          break;
+        }
+      }
+      
+      console.log('🏋️ Fetched all amenities:', allAmenitiesList.length);
+      console.log('🏋️ Amenities by category:', allAmenitiesList.reduce((acc: Record<string, number>, a: any) => {
+        const cat = a.category_name || 'Unknown';
+        acc[cat] = (acc[cat] || 0) + 1;
+        return acc;
+      }, {}));
+      
+      setAllAmenities(allAmenitiesList);
+      return allAmenitiesList;
+    } catch (err) {
+      console.error('Error fetching amenities:', err);
+    }
+    return [];
+  };
+
+  const fetchUserAssertions = async () => {
+    try {
+      const token = localStorage.getItem('access_token');
+      if (!token || !placeId) return;
+      
+      const response = await fetch(`${API_BASE_URL}/gyms/user-assertions/?place_id=${placeId}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        // Set the user's existing assertions
+        setAmenityVotes(data.assertions || {});
+      }
+    } catch (err) {
+      console.error('Error fetching user assertions:', err);
     }
   };
 
@@ -298,6 +387,39 @@ const WriteReviewPage: React.FC = () => {
           await deletePhotos(token, photosToDelete);
         }
         
+        // Submit amenity votes if any were selected
+        const amenitiesToSubmit: Record<string, boolean> = {};
+        Object.entries(amenityVotes).forEach(([amenityName, vote]) => {
+          if (vote !== undefined) {
+            amenitiesToSubmit[amenityName] = vote;
+          }
+        });
+        
+        if (Object.keys(amenitiesToSubmit).length > 0) {
+          try {
+            const amenityResponse = await fetch(`${API_BASE_URL}/gyms/bulk-assert-amenities/`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`,
+              },
+              body: JSON.stringify({
+                place_id: placeId,
+                amenities: amenitiesToSubmit,
+              }),
+            });
+            
+            if (amenityResponse.ok) {
+              console.log('✅ Amenity votes submitted successfully');
+            } else {
+              console.error('⚠️ Failed to submit amenity votes:', await amenityResponse.json());
+            }
+          } catch (err) {
+            console.error('Error submitting amenity votes:', err);
+            // Don't block navigation if amenity submission fails
+          }
+        }
+        
         // Upload new photos if any were selected
         if (selectedPhotos.length > 0 && reviewIdToUse) {
           console.log(`📤 Uploading ${selectedPhotos.length} photos to review ${reviewIdToUse} (edit mode: ${isEditMode})`);
@@ -489,6 +611,160 @@ const WriteReviewPage: React.FC = () => {
                 'Programs/Classes',
                 'Quality and variety of classes and training programs'
               )}
+            </div>
+
+            {/* Amenity Voting Section */}
+            <div className="mb-8">
+              <h2 className="text-xl font-semibold text-gray-900 mb-4">Confirm Amenities (Optional)</h2>
+              <p className="text-sm text-gray-600 mb-6">
+                Help other users by confirming which amenities this gym has. Select "Yes" if the gym has this amenity, or "No" if it doesn't.
+              </p>
+              
+              {/* Common amenities - always visible */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
+                {commonAmenities.map((amenityName) => {
+                  const currentVote = amenityVotes[amenityName];
+                  return (
+                    <div key={amenityName} className="border border-gray-200 rounded-lg p-4">
+                      <h3 className="text-sm font-medium text-gray-700 mb-3">{amenityName}</h3>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAmenityVotes({
+                              ...amenityVotes,
+                              [amenityName]: currentVote === true ? undefined : true,
+                            });
+                          }}
+                          className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                            currentVote === true
+                              ? 'bg-green-600 text-white'
+                              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                          }`}
+                        >
+                          Yes
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAmenityVotes({
+                              ...amenityVotes,
+                              [amenityName]: currentVote === false ? undefined : false,
+                            });
+                          }}
+                          className={`flex-1 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                            currentVote === false
+                              ? 'bg-red-600 text-white'
+                              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                          }`}
+                        >
+                          No
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              
+              {/* Add More button and additional amenities */}
+              <div>
+                <button
+                  type="button"
+                  onClick={() => setAmenitiesExpanded(!amenitiesExpanded)}
+                  className="mb-4 px-4 py-2 text-sm font-medium text-blue-600 hover:text-blue-700 border border-blue-600 rounded-lg hover:bg-blue-50 transition-colors"
+                >
+                  {amenitiesExpanded ? '▼ Collapse Additional Amenities' : '▶ Add More Amenities'}
+                </button>
+                
+                {/* Additional amenities - collapsible */}
+                {amenitiesExpanded && (
+                  <div className="space-y-6 mt-4">
+                    {(() => {
+                      // Filter out common amenities and group remaining by category
+                      const additionalAmenities = allAmenities.filter(
+                        amenity => !commonAmenities.includes(amenity.name)
+                      );
+                      
+                      console.log('🏋️ Additional amenities after filtering:', additionalAmenities.length);
+                      console.log('🏋️ Additional amenities by category:', additionalAmenities.reduce((acc: Record<string, number>, a: any) => {
+                        const cat = a.category_name || 'Unknown';
+                        acc[cat] = (acc[cat] || 0) + 1;
+                        return acc;
+                      }, {}));
+                      
+                      const groupedAmenities: Record<string, typeof allAmenities> = {};
+                      additionalAmenities.forEach(amenity => {
+                        const categoryName = amenity.category_name || 'Other';
+                        if (!groupedAmenities[categoryName]) {
+                          groupedAmenities[categoryName] = [];
+                        }
+                        groupedAmenities[categoryName].push(amenity);
+                      });
+                      
+                      console.log('🏋️ Grouped amenities:', Object.keys(groupedAmenities));
+                      
+                      if (Object.keys(groupedAmenities).length === 0) {
+                        return (
+                          <p className="text-sm text-gray-500 italic">No additional amenities available.</p>
+                        );
+                      }
+                      
+                      // Sort categories by name for consistent display
+                      const sortedCategories = Object.entries(groupedAmenities).sort(([a], [b]) => a.localeCompare(b));
+                      
+                      return sortedCategories.map(([categoryName, amenities]) => (
+                        <div key={categoryName} className="border border-gray-200 rounded-lg p-4">
+                          <h3 className="text-lg font-semibold text-gray-800 mb-4">{categoryName}</h3>
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                            {amenities.map((amenity) => {
+                              const currentVote = amenityVotes[amenity.name];
+                              return (
+                                <div key={amenity.id} className="border border-gray-200 rounded-lg p-3">
+                                  <h4 className="text-sm font-medium text-gray-700 mb-2">{amenity.name}</h4>
+                                  <div className="flex gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setAmenityVotes({
+                                          ...amenityVotes,
+                                          [amenity.name]: currentVote === true ? undefined : true,
+                                        });
+                                      }}
+                                      className={`flex-1 px-3 py-2 rounded text-xs font-medium transition-colors ${
+                                        currentVote === true
+                                          ? 'bg-green-600 text-white'
+                                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                                      }`}
+                                    >
+                                      Yes
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setAmenityVotes({
+                                          ...amenityVotes,
+                                          [amenity.name]: currentVote === false ? undefined : false,
+                                        });
+                                      }}
+                                      className={`flex-1 px-3 py-2 rounded text-xs font-medium transition-colors ${
+                                        currentVote === false
+                                          ? 'bg-red-600 text-white'
+                                          : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                                      }`}
+                                    >
+                                      No
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ));
+                    })()}
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Photo Upload Section */}

@@ -8,8 +8,9 @@ import h3
 from typing import List, Dict, Optional, Tuple
 from django.conf import settings
 from asgiref.sync import sync_to_async
-from .models import Gym, TileCache
+from .models import Gym, TileCache, GymAmenity, GymAmenityAssertion, User
 from django.db import connection
+from django.db.models import Sum, Case, When, FloatField, Count, Q
 import json
 from django.utils import timezone
 
@@ -1610,3 +1611,173 @@ class ImageModerationService:
             return 'copyright'
         else:
             return 'inappropriate_content'
+
+
+def promote_amenities_for_gym_amenity(
+    gym=None,
+    amenity=None,
+    min_confirmations=5,
+    min_confidence=0.85,
+    min_account_age=0,  # No account age threshold - age affects weight, not eligibility
+    min_reputation=0,  # No reputation threshold - reputation affects weight, not eligibility
+    min_users=1,
+    verify_confidence=0.7,
+    dry_run=False
+):
+    """
+    Promote amenity assertions to verified status for a specific gym-amenity combination.
+    This is the core promotion logic that can be called from endpoints or management commands.
+    
+    Args:
+        gym: Optional Gym instance. If None, processes all gyms.
+        amenity: Optional Amenity instance. If None, processes all amenities.
+        min_confirmations: Minimum weighted confirmations required (default: 5)
+        min_confidence: Minimum confidence threshold (default: 0.85)
+        min_account_age: Minimum account age in days (default: 0 - no threshold, age affects weight only)
+        min_reputation: Minimum reputation score (default: 0 - no threshold, reputation affects weight only)
+        min_users: Minimum number of distinct users required (default: 1)
+        verify_confidence: Confidence threshold for verification (default: 0.7)
+        dry_run: If True, don't save changes (default: False)
+    
+    Returns:
+        dict with keys:
+            - promoted_count: Number of amenities promoted to approved
+            - verified_count: Number of amenities verified
+            - rejected_count: Number of amenities rejected
+            - processed: List of processed gym-amenity combinations
+    
+    Note: Account age and reputation are used to calculate assertion weights (via calculate_weight()),
+    but are not used as eligibility thresholds. All users can contribute, but older/higher-reputation
+    users have more weight in the final decision.
+    """
+    # Get assertions from all users (no eligibility threshold)
+    # Account age and reputation affect weight, not eligibility
+    qualified_assertions = GymAmenityAssertion.objects.all()
+    
+    # Apply optional filters if thresholds are set (for backwards compatibility)
+    if min_account_age > 0:
+        qualified_assertions = qualified_assertions.filter(user__account_age_days__gte=min_account_age)
+    if min_reputation > 0:
+        qualified_assertions = qualified_assertions.filter(user__reputation_score__gte=min_reputation)
+    
+    # Filter by gym and/or amenity if provided
+    if gym:
+        qualified_assertions = qualified_assertions.filter(gym=gym)
+    if amenity:
+        qualified_assertions = qualified_assertions.filter(amenity=amenity)
+    
+    # Aggregate assertions by gym and amenity
+    qs = (qualified_assertions
+          .values('gym_id', 'amenity_id')
+          .annotate(
+              up=Sum(Case(When(has_amenity=True, then='weight'), default=0.0, output_field=FloatField())),
+              down=Sum(Case(When(has_amenity=False, then='weight'), default=0.0, output_field=FloatField())),
+              total_assertions=Count('id'),
+              distinct_users=Count('user', distinct=True)
+          ))
+    
+    promoted_count = 0
+    rejected_count = 0
+    verified_count = 0
+    processed = []
+    
+    for row in qs:
+        up_weight = row['up'] or 0.0
+        down_weight = row['down'] or 0.0
+        total_weight = up_weight + down_weight
+        
+        if total_weight == 0:
+            continue
+        
+        confidence = up_weight / total_weight
+        total_assertions = row['total_assertions']
+        distinct_users = row['distinct_users']
+        
+        # For single-user verification, use a lower confirmation threshold
+        # (since one user can only contribute one vote)
+        effective_min_confirmations = min_confirmations
+        if min_users == 1 and distinct_users == 1:
+            # Single user: only require that they voted (weight >= 1.0)
+            # This allows new users (weight ~1.2) to verify amenities
+            effective_min_confirmations = 1.0
+        
+        # Check if meets minimum thresholds
+        meets_confirmations = up_weight >= effective_min_confirmations
+        meets_confidence = confidence >= min_confidence
+        meets_users = distinct_users >= min_users
+        
+        # Get or create GymAmenity
+        gym_amenity, created = GymAmenity.objects.get_or_create(
+            gym_id=row['gym_id'],
+            amenity_id=row['amenity_id'],
+            defaults={
+                'status': 'pending',
+                'confidence_score': confidence,
+                'positive_votes': int(up_weight),
+                'negative_votes': int(down_weight)
+            }
+        )
+        
+        if not created:
+            # Update existing
+            gym_amenity.confidence_score = confidence
+            gym_amenity.positive_votes = int(up_weight)
+            gym_amenity.negative_votes = int(down_weight)
+        
+        # Determine new status
+        old_status = gym_amenity.status
+        
+        # Check if there are conflicting votes (both YES and NO votes)
+        has_conflicting_votes = up_weight > 0 and down_weight > 0
+        
+        if meets_confirmations and meets_confidence and meets_users:
+            # If there are conflicting votes, require at least 2 users for approval
+            # This prevents a single high-weight user from overriding multiple users
+            if has_conflicting_votes and distinct_users < 2:
+                # Conflicting votes but only 1 user - keep pending for more data
+                new_status = 'pending'
+                gym_amenity.is_verified = False
+            elif confidence >= verify_confidence and distinct_users >= 2:
+                # High confidence (70%+) AND multiple users agreeing = approved + verified
+                new_status = 'approved'
+                gym_amenity.is_verified = True
+                # Set verified_at timestamp when first verified
+                if not gym_amenity.verified_at:
+                    gym_amenity.verified_at = timezone.now()
+                verified_count += 1
+            else:
+                # Moderate confidence (50%+) or single user with no conflicts = approved but not verified
+                new_status = 'approved'
+                gym_amenity.is_verified = False  # Explicitly set to False
+                promoted_count += 1
+        elif confidence < 0.3:  # Very low confidence
+            new_status = 'rejected'
+            gym_amenity.is_verified = False
+            rejected_count += 1
+        else:
+            new_status = 'pending'  # Keep pending for more data
+            gym_amenity.is_verified = False
+        
+        # Update status
+        gym_amenity.status = new_status
+        
+        if not dry_run:
+            gym_amenity.save()
+        
+        processed.append({
+            'gym_id': row['gym_id'],
+            'amenity_id': row['amenity_id'],
+            'old_status': old_status,
+            'new_status': new_status,
+            'is_verified': gym_amenity.is_verified,
+            'confidence': confidence,
+            'up_weight': up_weight,
+            'users': distinct_users
+        })
+    
+    return {
+        'promoted_count': promoted_count,
+        'verified_count': verified_count,
+        'rejected_count': rejected_count,
+        'processed': processed
+    }

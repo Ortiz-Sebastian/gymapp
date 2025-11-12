@@ -5,7 +5,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
-from django.db.models import Q
+from django.db.models import Q, Prefetch
 from django.contrib.gis.geos import Point
 from django.contrib.gis.measure import D
 from django.utils import timezone
@@ -18,7 +18,7 @@ from .serializers import (GymSerializer, ReviewSerializer, UserSerializer,
                          AmenityCategorySerializer, AmenitySerializer, GymAmenitySerializer,
                          AmenityReportSerializer, GymClaimSerializer, AmenityVoteSerializer,
                          GymAmenityAssertionSerializer)
-from .services import GooglePlacesService, GeocodingService, LocationValidationService, ImageModerationService, calculate_distance
+from .services import GooglePlacesService, GeocodingService, LocationValidationService, ImageModerationService, calculate_distance, promote_amenities_for_gym_amenity
 
 User = get_user_model()
 
@@ -99,6 +99,15 @@ class GymViewSet(viewsets.ModelViewSet):
         place_id = self.request.query_params.get('place_id', None)
         if place_id:
             queryset = queryset.filter(place_id=place_id)
+            # Optimize query for detail view - prefetch amenities with their related data
+            # Use Prefetch to ensure amenities have their related objects (amenity, category) loaded
+            # This avoids N+1 queries when serializing amenities
+            queryset = queryset.prefetch_related(
+                Prefetch(
+                    'gym_amenities',
+                    queryset=GymAmenity.objects.select_related('amenity', 'amenity__category').all()
+                )
+            )
         
         return queryset
     
@@ -709,13 +718,218 @@ class GymViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+    @action(detail=False, methods=['post'], url_path='bulk-assert-amenities')
+    def bulk_assert_amenities(self, request):
+        """
+        Bulk submit amenity assertions for a gym.
+        
+        This endpoint collects user assertions (raw crowd data) and stores them as
+        GymAmenityAssertion objects. It updates confidence scores for real-time display,
+        but does NOT auto-approve amenities. The promote_amenities Celery task handles
+        promotion based on qualified users and proper thresholds.
+        
+        Required parameters:
+        - place_id: gym place_id
+        - amenities: dict of amenity_name -> has_amenity (boolean)
+        
+        Example:
+        {
+            "place_id": "ChIJ...",
+            "amenities": {
+                "Free Weights": true,
+                "Squat Racks": true,
+                "Showers": false
+            }
+        }
+        
+        Note: The confidence score is calculated from ALL assertions for real-time
+        feedback. The promote_amenities script will recalculate using only qualified
+        users (min account age, min reputation) when it runs periodically.
+        """
+        if not request.user.is_authenticated:
+            return Response(
+                {'error': 'Authentication required'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
+        place_id = request.data.get('place_id')
+        amenities_data = request.data.get('amenities', {})
+        
+        if not place_id:
+            return Response(
+                {'error': 'place_id is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not amenities_data:
+            return Response(
+                {'error': 'amenities dictionary is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            gym = Gym.objects.get(place_id=place_id)
+        except Gym.DoesNotExist:
+            return Response(
+                {'error': 'Gym not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Update user reputation and account age before creating assertions.
+        # This ensures assertion weights are calculated correctly immediately.
+        # The promote_amenities script also updates all users and recalculates
+        # all assertion weights periodically, but we update here for immediate accuracy.
+        # Note: This is not strictly redundant - the script updates ALL users,
+        # while we only update the submitting user for immediate accuracy.
+        request.user.update_reputation()
+        request.user.update_account_age()
+        
+        results = []
+        errors = []
+        
+        for amenity_name, has_amenity in amenities_data.items():
+            if not isinstance(has_amenity, bool):
+                errors.append(f"Invalid value for '{amenity_name}': must be boolean")
+                continue
+            
+            try:
+                # Get or create the amenity
+                amenity = Amenity.objects.get(name=amenity_name, status='approved')
+            except Amenity.DoesNotExist:
+                errors.append(f"Amenity '{amenity_name}' not found")
+                continue
+            except Amenity.MultipleObjectsReturned:
+                # If multiple amenities with same name, get the first one
+                amenity = Amenity.objects.filter(name=amenity_name, status='approved').first()
+            
+            # Get or create GymAmenity
+            gym_amenity, created = GymAmenity.objects.get_or_create(
+                gym=gym,
+                amenity=amenity,
+                defaults={'status': 'pending'}
+            )
+            
+            # Create or update assertion
+            assertion, assertion_created = GymAmenityAssertion.objects.get_or_create(
+                gym=gym,
+                amenity=amenity,
+                user=request.user,
+                defaults={
+                    'has_amenity': has_amenity,
+                }
+            )
+            
+            # Update assertion (this recalculates weight based on updated user reputation/account_age)
+            if not assertion_created:
+                # Update existing assertion
+                assertion.has_amenity = has_amenity
+            # Always save to ensure weight is recalculated with current user data
+            assertion.save()
+            
+            # Update confidence score for real-time display (uses ALL assertions)
+            confidence_data = gym_amenity.update_confidence_score()
+            
+            # Auto-verify using the shared promotion function
+            # This uses the same logic as the promote_amenities script
+            # No account age or reputation thresholds - all users can contribute
+            # Account age and reputation affect weight, not eligibility
+            # Lower min_confirmations to allow single-user verification with lower weight
+            promotion_result = promote_amenities_for_gym_amenity(
+                gym=gym,
+                amenity=amenity,
+                min_confirmations=1,  # Lower threshold to allow immediate verification
+                min_confidence=0.5,  # Lower confidence threshold (50% positive votes)
+                min_account_age=0,  # No threshold - age affects weight only
+                min_reputation=0,  # No threshold - reputation affects weight only
+                min_users=1,
+                verify_confidence=0.7,  # Still require 70% for verification badge
+                dry_run=False
+            )
+            
+            # Refresh gym_amenity to get updated status and is_verified
+            gym_amenity.refresh_from_db()
+            
+            results.append({
+                'amenity': amenity_name,
+                'has_amenity': has_amenity,
+                'created': assertion_created,
+                'confidence_score': gym_amenity.confidence_score,
+                'status': gym_amenity.status,
+                'is_verified': gym_amenity.is_verified
+            })
+        
+        return Response({
+            'success': True,
+            'results': results,
+            'errors': errors if errors else None
+        }, status=status.HTTP_200_OK)
+    
+    @action(detail=False, methods=['get'], url_path='user-assertions')
+    def get_user_assertions(self, request):
+        """
+        Get the current user's amenity assertions for a specific gym.
+        
+        Query parameters:
+        - place_id: gym place_id (required)
+        
+        Returns a dictionary mapping amenity names to has_amenity (boolean)
+        """
+        if not request.user.is_authenticated:
+            return Response(
+                {'error': 'Authentication required'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
+        place_id = request.query_params.get('place_id')
+        if not place_id:
+            return Response(
+                {'error': 'place_id query parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            gym = Gym.objects.get(place_id=place_id)
+        except Gym.DoesNotExist:
+            return Response(
+                {'error': 'Gym not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get all assertions for this user and gym
+        assertions = GymAmenityAssertion.objects.filter(
+            gym=gym,
+            user=request.user
+        ).select_related('amenity')
+        
+        # Build dictionary: amenity_name -> has_amenity
+        assertions_dict = {}
+        for assertion in assertions:
+            assertions_dict[assertion.amenity.name] = assertion.has_amenity
+        
+        return Response({
+            'place_id': place_id,
+            'assertions': assertions_dict
+        }, status=status.HTTP_200_OK)
+
 class ReviewViewSet(viewsets.ModelViewSet):
     queryset = Review.objects.all()
     serializer_class = ReviewSerializer
     permission_classes = [permissions.IsAuthenticatedOrReadOnly]  # Require auth to create, allow viewing
 
     def get_queryset(self):
+        from django.db.models import Prefetch
+        
         queryset = Review.objects.all().prefetch_related('photos')
+        
+        # Prefetch the current user's votes on these reviews (if authenticated)
+        if self.request.user.is_authenticated:
+            queryset = queryset.prefetch_related(
+                Prefetch(
+                    'votes',
+                    queryset=ReviewVote.objects.filter(user=self.request.user),
+                    to_attr='user_votes'
+                )
+            )
         
         # Filter by gym if provided (for gym detail page - shows all reviews for that gym)
         gym_place_id = self.request.query_params.get('gym', None)
@@ -752,6 +966,84 @@ class ReviewViewSet(viewsets.ModelViewSet):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("You can only edit your own reviews.")
         serializer.save()
+
+    @action(detail=True, methods=['post'], url_path='vote')
+    def vote(self, request, pk=None):
+        """Vote helpful or not helpful on a review"""
+        if not request.user.is_authenticated:
+            return Response(
+                {'error': 'Authentication required'}, 
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        
+        # Get the review directly by pk, bypassing get_queryset filters
+        # This allows voting on any review, not just ones in the filtered queryset
+        try:
+            review = Review.objects.get(pk=pk)
+        except Review.DoesNotExist:
+            return Response(
+                {'error': 'Review not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        vote_type = request.data.get('vote_type')
+        
+        if vote_type not in ['helpful', 'not_helpful']:
+            return Response(
+                {'error': 'vote_type must be "helpful" or "not_helpful"'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if user already voted
+        existing_vote = ReviewVote.objects.filter(
+            review=review, 
+            user=request.user
+        ).first()
+        
+        if existing_vote:
+            if existing_vote.vote_type == vote_type:
+                # Same vote, remove it
+                existing_vote.delete()
+                if vote_type == 'helpful':
+                    review.helpful_votes = max(0, review.helpful_votes - 1)
+                else:
+                    review.not_helpful_votes = max(0, review.not_helpful_votes - 1)
+                review.save()
+                return Response({'message': 'Vote removed'}, status=status.HTTP_200_OK)
+            else:
+                # Different vote, update it
+                old_vote_type = existing_vote.vote_type
+                existing_vote.vote_type = vote_type
+                existing_vote.save()
+                
+                # Update counts
+                if old_vote_type == 'helpful':
+                    review.helpful_votes = max(0, review.helpful_votes - 1)
+                else:
+                    review.not_helpful_votes = max(0, review.not_helpful_votes - 1)
+                
+                if vote_type == 'helpful':
+                    review.helpful_votes += 1
+                else:
+                    review.not_helpful_votes += 1
+                
+                review.save()
+                return Response({'message': 'Vote updated'}, status=status.HTTP_200_OK)
+        else:
+            # New vote
+            ReviewVote.objects.create(
+                review=review,
+                user=request.user,
+                vote_type=vote_type
+            )
+            
+            if vote_type == 'helpful':
+                review.helpful_votes += 1
+            else:
+                review.not_helpful_votes += 1
+            review.save()
+            
+            return Response({'message': 'Vote recorded'}, status=status.HTTP_201_CREATED)
 
 # CommentViewSet removed - reviews now include text directly
 

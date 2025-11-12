@@ -32,4 +32,10 @@ Thumbs.db
 *.weights
 *.cfg
 ml_models/
-classifier_model* 
+classifier_model*
+
+# Celery Beat Schedule (local state files)
+celerybeat-schedule
+celerybeat-schedule-shm
+celerybeat-schedule-wal
+celerybeat-schedule.* 

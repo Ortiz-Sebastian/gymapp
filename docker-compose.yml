@@ -61,6 +61,7 @@ services:
       - POSTGRES_PORT=5432
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - GOOGLE_PLACES_API_KEY=${GOOGLE_PLACES_API_KEY}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1,backend}
       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://localhost:3000,http://frontend}
@@ -101,6 +102,39 @@ services:
       - POSTGRES_PORT=5432
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - GOOGLE_PLACES_API_KEY=${GOOGLE_PLACES_API_KEY}
+    depends_on:
+      - db
+      - redis
+      - backend
+    networks:
+      - gymapp-network
+
+  # Celery Beat (for scheduled/periodic tasks)
+  celery-beat:
+    build:
+      context: ./Backend
+      dockerfile: Dockerfile
+    container_name: gymapp-celery-beat
+    command: sh -c "cd gymReview && celery -A gymReview beat --loglevel=info"
+    volumes:
+      - ./Backend:/app
+      - ml_models:/app/ml_models
+    environment:
+      - DEBUG=${DEBUG:-True}
+      - SECRET_KEY=${SECRET_KEY:-your-secret-key-change-in-production}
+      - USE_POSTGRES=${USE_POSTGRES:-true}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-gymapp_user}:${POSTGRES_PASSWORD:-gymapp_password}@db:5432/${POSTGRES_DB:-gymapp}
+      - POSTGRES_DB=${POSTGRES_DB:-gymapp}
+      - POSTGRES_USER=${POSTGRES_USER:-gymapp_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-gymapp_password}
+      - USE_DB_ONLY_MODE=${USE_DB_ONLY_MODE:-true}
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - GOOGLE_PLACES_API_KEY=${GOOGLE_PLACES_API_KEY}
     depends_on:
       - db

@@ -1,7 +1,6 @@
 from django.core.management.base import BaseCommand
-from django.db.models import Sum, Case, When, FloatField, Count, Q
-from django.utils import timezone
-from gymapp.models import GymAmenity, GymAmenityAssertion, User
+from gymapp.models import User, GymAmenityAssertion
+from gymapp.services import promote_amenities_for_gym_amenity
 
 
 class Command(BaseCommand):
@@ -23,14 +22,26 @@ class Command(BaseCommand):
         parser.add_argument(
             '--min-account-age',
             type=int,
-            default=7,
-            help='Minimum account age in days (default: 7)'
+            default=0,
+            help='Minimum account age in days (default: 0 - no threshold, age affects weight only)'
         )
         parser.add_argument(
             '--min-reputation',
             type=int,
-            default=10,
-            help='Minimum reputation score (default: 10)'
+            default=0,
+            help='Minimum reputation score (default: 0 - no threshold, reputation affects weight only)'
+        )
+        parser.add_argument(
+            '--min-users',
+            type=int,
+            default=1,
+            help='Minimum number of distinct users required (default: 1)'
+        )
+        parser.add_argument(
+            '--verify-confidence',
+            type=float,
+            default=0.7,
+            help='Confidence threshold for verification (default: 0.7)'
         )
         parser.add_argument(
             '--dry-run',
@@ -43,6 +54,8 @@ class Command(BaseCommand):
         min_confidence = options['min_confidence']
         min_account_age = options['min_account_age']
         min_reputation = options['min_reputation']
+        min_users = options['min_users']
+        verify_confidence = options['verify_confidence']
         dry_run = options['dry_run']
 
         self.stdout.write(f'Starting amenity promotion with thresholds:')
@@ -50,6 +63,8 @@ class Command(BaseCommand):
         self.stdout.write(f'  Min confidence: {min_confidence}')
         self.stdout.write(f'  Min account age: {min_account_age} days')
         self.stdout.write(f'  Min reputation: {min_reputation}')
+        self.stdout.write(f'  Min users: {min_users}')
+        self.stdout.write(f'  Verify confidence: {verify_confidence}')
         self.stdout.write(f'  Dry run: {dry_run}')
         self.stdout.write('')
 
@@ -62,91 +77,54 @@ class Command(BaseCommand):
             users_updated += 1
         
         self.stdout.write(f'Updated {users_updated} users')
+        
+        # Recalculate assertion weights for all assertions (since user reputations changed)
+        # This ensures assertion weights reflect current user reputation/account age.
+        # We need to recalculate because assertion weights depend on user reputation/account age,
+        # which we just updated. The endpoint also updates user reputation when creating assertions,
+        # but this batch recalculation ensures all assertion weights are up-to-date.
+        self.stdout.write('Recalculating assertion weights...')
+        assertions_updated = 0
+        
+        # Use iterator() for memory efficiency with large datasets
+        # Note: We use select_related('user') to avoid N+1 queries when calculating weights.
+        # Since we just updated all users in the database, select_related will fetch the updated values
+        # from the database (which we just saved).
+        for assertion in GymAmenityAssertion.objects.all().select_related('user').iterator(chunk_size=1000):
+            old_weight = assertion.weight
+            # Trigger weight recalculation (save() calls calculate_weight() which reads user reputation/account_age)
+            # The user object is already loaded via select_related and reflects the updated DB values
+            assertion.save()  # Save triggers calculate_weight() which uses the user's updated reputation/account_age
+            if assertion.weight != old_weight:
+                assertions_updated += 1
+        
+        self.stdout.write(f'Updated {assertions_updated} assertion weights')
+        self.stdout.write('')
 
-        # Get assertions from qualified users only
-        qualified_assertions = GymAmenityAssertion.objects.filter(
-            user__account_age_days__gte=min_account_age,
-            user__reputation_score__gte=min_reputation
+        # Use the shared promotion function to process all gym-amenity combinations
+        result = promote_amenities_for_gym_amenity(
+            gym=None,  # Process all gyms
+            amenity=None,  # Process all amenities
+            min_confirmations=min_confirmations,
+            min_confidence=min_confidence,
+            min_account_age=min_account_age,
+            min_reputation=min_reputation,
+            min_users=min_users,
+            verify_confidence=verify_confidence,
+            dry_run=dry_run
         )
-
-        self.stdout.write(f'Found {qualified_assertions.count()} assertions from qualified users')
-
-        # Aggregate assertions by gym and amenity
-        qs = (qualified_assertions
-              .values('gym_id', 'amenity_id')
-              .annotate(
-                  up=Sum(Case(When(has_amenity=True, then='weight'), default=0.0, output_field=FloatField())),
-                  down=Sum(Case(When(has_amenity=False, then='weight'), default=0.0, output_field=FloatField())),
-                  total_assertions=Count('id'),
-                  distinct_users=Count('user', distinct=True)
-              ))
-
-        promoted_count = 0
-        rejected_count = 0
-        verified_count = 0
-
-        for row in qs:
-            up_weight = row['up'] or 0.0
-            down_weight = row['down'] or 0.0
-            total_weight = up_weight + down_weight
-            
-            if total_weight == 0:
-                continue
-            
-            confidence = up_weight / total_weight
-            total_assertions = row['total_assertions']
-            distinct_users = row['distinct_users']
-            
-            # Check if meets minimum thresholds
-            meets_confirmations = up_weight >= min_confirmations
-            meets_confidence = confidence >= min_confidence
-            meets_users = distinct_users >= 3  # Require at least 3 different users
-            
-            # Get or create GymAmenity
-            gym_amenity, created = GymAmenity.objects.get_or_create(
-                gym_id=row['gym_id'],
-                amenity_id=row['amenity_id'],
-                defaults={
-                    'status': 'pending',
-                    'confidence_score': confidence,
-                    'positive_votes': int(up_weight),
-                    'negative_votes': int(down_weight)
-                }
-            )
-            
-            if not created:
-                # Update existing
-                gym_amenity.confidence_score = confidence
-                gym_amenity.positive_votes = int(up_weight)
-                gym_amenity.negative_votes = int(down_weight)
-            
-            # Determine new status
-            if meets_confirmations and meets_confidence and meets_users:
-                if confidence >= 0.9:  # Very high confidence
-                    new_status = 'approved'
-                    gym_amenity.is_verified = True
-                    verified_count += 1
-                else:
-                    new_status = 'approved'
-                    promoted_count += 1
-            elif confidence < 0.3:  # Very low confidence
-                new_status = 'rejected'
-                rejected_count += 1
-            else:
-                new_status = 'pending'  # Keep pending for more data
-            
-            old_status = gym_amenity.status
-            gym_amenity.status = new_status
-            
-            if not dry_run:
-                gym_amenity.save()
-            
-            # Log the change
+        
+        promoted_count = result['promoted_count']
+        verified_count = result['verified_count']
+        rejected_count = result['rejected_count']
+        
+        # Log the changes
+        for item in result['processed']:
             self.stdout.write(
                 f'{"[DRY RUN] " if dry_run else ""}'
-                f'Gym {row["gym_id"]} - Amenity {row["amenity_id"]}: '
-                f'{old_status} → {new_status} '
-                f'(conf: {confidence:.3f}, up: {up_weight:.1f}, users: {distinct_users})'
+                f'Gym {item["gym_id"]} - Amenity {item["amenity_id"]}: '
+                f'{item["old_status"]} → {item["new_status"]} '
+                f'(conf: {item["confidence"]:.3f}, up: {item["up_weight"]:.1f}, users: {item["users"]})'
             )
 
         self.stdout.write('')

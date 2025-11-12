@@ -1,10 +1,12 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+import logging
 from .models import (Gym, Review, GymPhoto, ReviewVote, PhotoLike, UserFavorite, PhotoReport,
                      AmenityCategory, Amenity, GymAmenity, AmenityReport, GymClaim, AmenityVote,
                      GymAmenityAssertion)
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 class UserSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, min_length=8)
@@ -51,6 +53,7 @@ class ReviewSerializer(serializers.ModelSerializer):
     helpful_votes = serializers.ReadOnlyField()
     not_helpful_votes = serializers.ReadOnlyField()
     photos = serializers.SerializerMethodField()
+    user_vote = serializers.SerializerMethodField()
     
     class Meta:
         model = Review
@@ -59,10 +62,10 @@ class ReviewSerializer(serializers.ModelSerializer):
             'equipment_rating', 'cleanliness_rating',
             'staff_rating', 'value_rating', 'atmosphere_rating', 'programs_classes_rating',
             'overall_rating', 'review_text', 'review_photo', 'photos', 'would_recommend',
-            'is_anonymous', 'helpful_votes', 'not_helpful_votes',
+            'is_anonymous', 'helpful_votes', 'not_helpful_votes', 'user_vote',
             'created_at', 'updated_at'
         ]
-        read_only_fields = ['user', 'gym_detail', 'created_at', 'updated_at', 'helpful_votes', 'not_helpful_votes', 'photos']
+        read_only_fields = ['user', 'gym_detail', 'created_at', 'updated_at', 'helpful_votes', 'not_helpful_votes', 'photos', 'user_vote']
     
     def get_user(self, obj):
         """Return display name - show as Anonymous if is_anonymous is True"""
@@ -103,6 +106,35 @@ class ReviewSerializer(serializers.ModelSerializer):
         for idx, photo in enumerate(photo_data):
             print(f"   Photo {idx + 1}: ID={photo.get('id')}, URL={photo.get('photo', 'NO URL')}, status={photo.get('moderation_status')}")
         return photo_data
+    
+    def get_user_vote(self, obj):
+        """Return the current user's vote on this review, if any"""
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return None
+        
+        # Check if user has voted on this review
+        # Use prefetched data if available to avoid N+1 queries
+        if hasattr(obj, 'user_votes'):
+            # user_votes is a list prefetched for the current user, so it should only contain votes by this user
+            # Since we filtered by user in the Prefetch, if the list has items, the first one is the user's vote
+            if obj.user_votes and len(obj.user_votes) > 0:
+                vote_type = obj.user_votes[0].vote_type
+                print(f"✅ Review {obj.id}: Found prefetched vote for user {request.user.username}: {vote_type}")
+                return vote_type
+            # Empty list means user hasn't voted
+            print(f"ℹ️ Review {obj.id}: No prefetched vote found for user {request.user.username}")
+            return None
+        else:
+            # Fallback to querying the database (shouldn't happen if prefetch is working correctly)
+            try:
+                from .models import ReviewVote
+                user_vote = ReviewVote.objects.get(review=obj, user=request.user)
+                print(f"✅ Review {obj.id}: Found vote via DB query for user {request.user.username}: {user_vote.vote_type}")
+                return user_vote.vote_type
+            except ReviewVote.DoesNotExist:
+                print(f"ℹ️ Review {obj.id}: No vote found in DB for user {request.user.username}")
+                return None
 
 # CommentSerializer removed - reviews now include text directly
 
@@ -146,18 +178,17 @@ class AdminGymPhotoSerializer(serializers.ModelSerializer):
 
 
 class GymAmenitySerializer(serializers.ModelSerializer):
+    # Use ReadOnlyField with source - this should work if prefetch_related is set up correctly
+    # The Prefetch in the viewset ensures amenity and category are loaded
     amenity_name = serializers.ReadOnlyField(source='amenity.name')
     amenity_category = serializers.ReadOnlyField(source='amenity.category.name')
-    added_by_username = serializers.ReadOnlyField(source='added_by.username')
-    verified_by_username = serializers.ReadOnlyField(source='verified_by.username')
     
     class Meta:
         model = GymAmenity
         fields = ['id', 'gym', 'amenity', 'amenity_name', 'amenity_category',
-                 'is_verified', 'added_by', 'added_by_username', 'verified_by', 'verified_by_username',
-                 'verified_at', 'positive_votes', 'negative_votes', 'confidence_score', 'status',
+                 'is_verified', 'verified_at', 'positive_votes', 'negative_votes', 'confidence_score', 'status',
                  'notes', 'is_available', 'created_at', 'updated_at']
-        read_only_fields = ['added_by', 'verified_by', 'verified_at', 'positive_votes', 'negative_votes', 
+        read_only_fields = ['verified_at', 'positive_votes', 'negative_votes', 
                            'confidence_score', 'created_at', 'updated_at']
 
 

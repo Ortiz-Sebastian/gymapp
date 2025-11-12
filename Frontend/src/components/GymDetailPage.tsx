@@ -3,16 +3,12 @@ import { useParams, useNavigate } from 'react-router-dom';
 
 interface Amenity {
   id: number;
-  amenity: {
-    id: number;
-    name: string;
-    category: {
-      id: number;
-      name: string;
-    };
-  };
+  amenity: number;  // This is the amenity ID (ForeignKey)
+  amenity_name: string;  // This is the name from the serializer
+  amenity_category: string;  // This is the category name from the serializer
   confidence_score: number;
   is_verified: boolean;
+  status: 'pending' | 'approved' | 'rejected' | 'flagged';
 }
 
 interface GooglePhoto {
@@ -67,6 +63,7 @@ interface Review {
   updated_at: string;
   helpful_votes: number;
   not_helpful_votes: number;
+  user_vote?: 'helpful' | 'not_helpful' | null;
 }
 
 const GymDetailPage: React.FC = () => {
@@ -112,6 +109,55 @@ const GymDetailPage: React.FC = () => {
       return;
     }
 
+    // Optimistic UI update - update the UI immediately
+    setReviews(prevReviews => {
+      return prevReviews.map(review => {
+        if (review.id === reviewId) {
+          const currentVote = review.user_vote;
+          let newVote: 'helpful' | 'not_helpful' | null = null;
+          let newHelpfulVotes = review.helpful_votes || 0;
+          let newNotHelpfulVotes = review.not_helpful_votes || 0;
+
+          // If clicking the same vote type, remove the vote (toggle off)
+          if (currentVote === voteType) {
+            newVote = null;
+            if (voteType === 'helpful') {
+              newHelpfulVotes = Math.max(0, newHelpfulVotes - 1);
+            } else {
+              newNotHelpfulVotes = Math.max(0, newNotHelpfulVotes - 1);
+            }
+          } else {
+            // If clicking a different vote type, switch the vote
+            newVote = voteType;
+            if (currentVote === 'helpful') {
+              // Was helpful, switching to not_helpful
+              newHelpfulVotes = Math.max(0, newHelpfulVotes - 1);
+              newNotHelpfulVotes += 1;
+            } else if (currentVote === 'not_helpful') {
+              // Was not_helpful, switching to helpful
+              newNotHelpfulVotes = Math.max(0, newNotHelpfulVotes - 1);
+              newHelpfulVotes += 1;
+            } else {
+              // No previous vote, add new vote
+              if (voteType === 'helpful') {
+                newHelpfulVotes += 1;
+              } else {
+                newNotHelpfulVotes += 1;
+              }
+            }
+          }
+
+          return {
+            ...review,
+            user_vote: newVote,
+            helpful_votes: newHelpfulVotes,
+            not_helpful_votes: newNotHelpfulVotes,
+          };
+        }
+        return review;
+      });
+    });
+
     try {
       const response = await fetch(`${API_BASE_URL}/reviews/${reviewId}/vote/`, {
         method: 'POST',
@@ -123,15 +169,20 @@ const GymDetailPage: React.FC = () => {
       });
 
       if (response.ok) {
-        // Refresh reviews to get updated vote counts
+        // Refresh reviews to get updated vote counts from server (in case of conflicts)
         fetchReviews();
       } else {
+        // If vote failed, revert the optimistic update
         const data = await response.json();
         alert(data.error || 'Failed to vote');
+        // Revert by fetching fresh data
+        fetchReviews();
       }
     } catch (err) {
       console.error('Error voting:', err);
       alert('An error occurred while voting');
+      // Revert by fetching fresh data
+      fetchReviews();
     }
   };
 
@@ -172,8 +223,6 @@ const GymDetailPage: React.FC = () => {
       if (data.results && data.results.length > 0) {
         const gymData = data.results[0];
         console.log('GymDetailPage: Setting gym:', gymData.name, gymData.place_id);
-        console.log('🔑 Gym ID:', gymData.id);
-        console.log('📦 Full gymData object:', gymData);
         setGym(gymData);
         
         // Convert Google photo references to photo URLs (using backend proxy to avoid CORS)
@@ -207,15 +256,28 @@ const GymDetailPage: React.FC = () => {
   const fetchReviews = async () => {
     try {
       console.log('🔍 Fetching reviews for gym:', placeId);
-      const response = await fetch(`${API_BASE_URL}/reviews/?gym=${placeId}`);
+      const token = localStorage.getItem('access_token');
+      const headers: HeadersInit = {
+        'Content-Type': 'application/json',
+      };
+      
+      // Include authorization token if available (needed for user_vote field)
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      
+      const response = await fetch(`${API_BASE_URL}/reviews/?gym=${placeId}`, {
+        headers,
+      });
       console.log('📡 Reviews response status:', response.status);
       const data = await response.json();
       console.log('📦 Reviews data received:', data);
       const reviewsArray = data.results || data || [];
       console.log('✅ Setting reviews, count:', reviewsArray.length);
       
-      // Log photo data for debugging
+      // Log vote data for debugging
       reviewsArray.forEach((review: Review) => {
+        console.log(`🗳️ Review ${review.id} - user_vote: ${review.user_vote || 'null'}, helpful: ${review.helpful_votes}, not_helpful: ${review.not_helpful_votes}`);
         if (review.photos && review.photos.length > 0) {
           console.log(`📸 Review ${review.id} has ${review.photos.length} photos:`, review.photos);
           review.photos.forEach((photo, idx) => {
@@ -607,13 +669,21 @@ const GymDetailPage: React.FC = () => {
               {gym.amenities && gym.amenities.length > 0 ? (
                 <div className="space-y-2">
                   {gym.amenities
-                    .filter(a => a.is_verified)
+                    .filter(a => a.status === 'approved')
                     .map((gymAmenity) => (
                       <div key={gymAmenity.id} className="flex items-center text-sm">
                         <svg className="w-4 h-4 text-green-500 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                           <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
                         </svg>
-                        <span className="text-gray-700">{gymAmenity.amenity.name}</span>
+                        <span className="text-gray-700">{gymAmenity.amenity_name || 'Unknown Amenity'}</span>
+                        {gymAmenity.is_verified && (
+                          <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800" title="High confidence - verified by multiple users">
+                            <svg className="w-3 h-3 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                              <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+                            </svg>
+                            High Confidence
+                          </span>
+                        )}
                       </div>
                     ))}
                 </div>
@@ -830,25 +900,57 @@ const GymDetailPage: React.FC = () => {
                   {/* Action Buttons */}
                   <div className="flex items-center justify-between pt-4 border-t border-gray-200">
                     {/* Helpful/Not Helpful Buttons */}
-                    <div className="flex items-center gap-4">
-                      <button
-                        onClick={() => handleVote(review.id, 'helpful')}
-                        className="flex items-center gap-1 text-sm text-gray-600 hover:text-green-600 transition-colors"
-                      >
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5" />
-                        </svg>
-                        <span>Helpful ({review.helpful_votes})</span>
-                      </button>
-                      <button
-                        onClick={() => handleVote(review.id, 'not_helpful')}
-                        className="flex items-center gap-1 text-sm text-gray-600 hover:text-red-600 transition-colors"
-                      >
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-10h2a2 2 0 012 2v6a2 2 0 01-2 2h-2.5" />
-                        </svg>
-                        <span>Not Helpful ({review.not_helpful_votes})</span>
-                      </button>
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center gap-4">
+                        <button
+                          onClick={() => handleVote(review.id, 'helpful')}
+                          className={`flex items-center gap-1 text-sm transition-colors ${
+                            review.user_vote === 'helpful'
+                              ? 'text-green-600 font-semibold'
+                              : 'text-gray-600 hover:text-green-600'
+                          }`}
+                        >
+                          <svg 
+                            className="w-5 h-5" 
+                            fill={review.user_vote === 'helpful' ? 'currentColor' : 'none'} 
+                            stroke="currentColor" 
+                            strokeWidth={2}
+                            viewBox="0 0 24 24"
+                          >
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M14 10h4.764a2 2 0 011.789 2.894l-3.5 7A2 2 0 0115.263 21h-4.017c-.163 0-.326-.02-.485-.06L7 20m7-10V5a2 2 0 00-2-2h-.095c-.5 0-.905.405-.905.905 0 .714-.211 1.412-.608 2.006L7 11v9m7-10h-2M7 20H5a2 2 0 01-2-2v-6a2 2 0 012-2h2.5" />
+                          </svg>
+                          <span>Helpful ({review.helpful_votes || 0})</span>
+                        </button>
+                        <button
+                          onClick={() => handleVote(review.id, 'not_helpful')}
+                          className={`flex items-center gap-1 text-sm transition-colors ${
+                            review.user_vote === 'not_helpful'
+                              ? 'text-red-600 font-semibold'
+                              : 'text-gray-600 hover:text-red-600'
+                          }`}
+                        >
+                          <svg 
+                            className="w-5 h-5" 
+                            fill={review.user_vote === 'not_helpful' ? 'currentColor' : 'none'} 
+                            stroke="currentColor" 
+                            strokeWidth={2}
+                            viewBox="0 0 24 24"
+                          >
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M10 14H5.236a2 2 0 01-1.789-2.894l3.5-7A2 2 0 018.736 3h4.018a2 2 0 01.485.06l3.76.94m-7 10v5a2 2 0 002 2h.096c.5 0 .905-.405.905-.904 0-.715.211-1.413.608-2.008L17 13V4m-7 10h2m5-10h2a2 2 0 012 2v6a2 2 0 01-2 2h-2.5" />
+                          </svg>
+                          <span>Not Helpful ({review.not_helpful_votes || 0})</span>
+                        </button>
+                      </div>
+                      {/* Net Vote Display */}
+                      {(() => {
+                        const netVotes = (review.helpful_votes || 0) - (review.not_helpful_votes || 0);
+                        const colorClass = netVotes > 0 ? 'text-green-600' : netVotes < 0 ? 'text-red-600' : 'text-gray-500';
+                        return (
+                          <div className={`text-xs font-medium ${colorClass}`}>
+                            Net: {netVotes > 0 ? '+' : ''}{netVotes}
+                          </div>
+                        );
+                      })()}
                     </div>
 
                     {/* Edit/Delete Buttons (only if user owns this review) */}
