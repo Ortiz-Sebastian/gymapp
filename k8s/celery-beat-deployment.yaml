@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gymapp-celery-beat
+  namespace: gymapp
+  labels:
+    app: gymapp-celery-beat
+spec:
+  replicas: 1  # Only one Beat scheduler should run
+  selector:
+    matchLabels:
+      app: gymapp-celery-beat
+  template:
+    metadata:
+      labels:
+        app: gymapp-celery-beat
+    spec:
+      containers:
+      - name: celery-beat
+        image: your-registry/gymapp-backend:latest  # Replace with your image
+        command:
+        - sh
+        - -c
+        - |
+          cd gymReview
+          celery -A gymReview beat --loglevel=info
+        env:
+        - name: DEBUG
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: DEBUG
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: gymapp-secrets
+              key: SECRET_KEY
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: POSTGRES_DB
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: gymapp-secrets
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: POSTGRES_HOST
+        - name: POSTGRES_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: POSTGRES_PORT
+        - name: USE_POSTGRES
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: USE_POSTGRES
+        - name: USE_DB_ONLY_MODE
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: USE_DB_ONLY_MODE
+        - name: REDIS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: REDIS_URL
+        - name: CELERY_BROKER_URL
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: CELERY_BROKER_URL
+        - name: CELERY_RESULT_BACKEND
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: CELERY_RESULT_BACKEND
+        - name: GOOGLE_PLACES_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: gymapp-secrets
+              key: GOOGLE_PLACES_API_KEY
+        volumeMounts:
+        - name: media-volume
+          mountPath: /app/media
+        - name: ml-models-volume
+          mountPath: /app/ml_models
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: media-volume
+        persistentVolumeClaim:
+          claimName: media-pvc
+      - name: ml-models-volume
+        persistentVolumeClaim:
+          claimName: ml-models-pvc
+

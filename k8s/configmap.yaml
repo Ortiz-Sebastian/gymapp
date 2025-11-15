@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gymapp-config
+  namespace: gymapp
+data:
+  POSTGRES_DB: "gymapp"
+  POSTGRES_USER: "gymapp_user"
+  POSTGRES_HOST: "gymapp-db"
+  POSTGRES_PORT: "5432"
+  REDIS_URL: "redis://gymapp-redis:6379/0"
+  CELERY_BROKER_URL: "redis://gymapp-redis:6379/0"
+  CELERY_RESULT_BACKEND: "redis://gymapp-redis:6379/0"
+  USE_POSTGRES: "true"
+  USE_DB_ONLY_MODE: "true"
+  DEBUG: "False"
+  MEDIA_ROOT: "/app/media"
+  ALLOWED_HOSTS: "gymapp.example.com,localhost"
+  CORS_ALLOWED_ORIGINS: "https://gymapp.example.com,http://localhost:5173"
+

@@ -1,0 +1,200 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gymapp-backend
+  namespace: gymapp
+  labels:
+    app: gymapp-backend
+spec:
+  replicas: 2  # Scale as needed
+  selector:
+    matchLabels:
+      app: gymapp-backend
+  template:
+    metadata:
+      labels:
+        app: gymapp-backend
+    spec:
+      initContainers:
+      - name: migrate
+        image: your-registry/gymapp-backend:latest  # Replace with your image
+        command:
+        - sh
+        - -c
+        - |
+          cd gymReview
+          python manage.py migrate
+        env:
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: POSTGRES_DB
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: gymapp-secrets
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: POSTGRES_HOST
+        - name: POSTGRES_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: POSTGRES_PORT
+        - name: USE_POSTGRES
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: USE_POSTGRES
+      containers:
+      - name: backend
+        image: your-registry/gymapp-backend:latest  # Replace with your image
+        ports:
+        - containerPort: 8000
+        command:
+        - sh
+        - -c
+        - |
+          cd gymReview
+          python manage.py collectstatic --noinput
+          gunicorn --bind 0.0.0.0:8000 --workers 4 --timeout 120 gymReview.wsgi:application
+        env:
+        - name: DEBUG
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: DEBUG
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: gymapp-secrets
+              key: SECRET_KEY
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: POSTGRES_DB
+        - name: POSTGRES_USER
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: gymapp-secrets
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: POSTGRES_HOST
+        - name: POSTGRES_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: POSTGRES_PORT
+        - name: USE_POSTGRES
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: USE_POSTGRES
+        - name: USE_DB_ONLY_MODE
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: USE_DB_ONLY_MODE
+        - name: REDIS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: REDIS_URL
+        - name: CELERY_BROKER_URL
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: CELERY_BROKER_URL
+        - name: CELERY_RESULT_BACKEND
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: CELERY_RESULT_BACKEND
+        - name: GOOGLE_PLACES_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: gymapp-secrets
+              key: GOOGLE_PLACES_API_KEY
+        - name: ALLOWED_HOSTS
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: ALLOWED_HOSTS
+        - name: CORS_ALLOWED_ORIGINS
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: CORS_ALLOWED_ORIGINS
+        - name: MEDIA_ROOT
+          valueFrom:
+            configMapKeyRef:
+              name: gymapp-config
+              key: MEDIA_ROOT
+        volumeMounts:
+        - name: media-volume
+          mountPath: /app/media
+        - name: ml-models-volume
+          mountPath: /app/ml_models
+        livenessProbe:
+          httpGet:
+            path: /api/health/
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/health/
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+      volumes:
+      - name: media-volume
+        persistentVolumeClaim:
+          claimName: media-pvc
+      - name: ml-models-volume
+        persistentVolumeClaim:
+          claimName: ml-models-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gymapp-backend
+  namespace: gymapp
+  labels:
+    app: gymapp-backend
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+  selector:
+    app: gymapp-backend
+

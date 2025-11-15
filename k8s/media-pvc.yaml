@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: media-pvc
+  namespace: gymapp
+spec:
+  accessModes:
+    - ReadWriteMany  # For media files that may be accessed by multiple pods
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard
+

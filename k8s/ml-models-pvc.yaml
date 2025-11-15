@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ml-models-pvc
+  namespace: gymapp
+spec:
+  accessModes:
+    - ReadWriteMany  # ML models can be shared across pods
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: standard
+
